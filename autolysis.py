@@ -19,7 +19,12 @@ import argparse
 import numpy as np
 import pandas as pd
 import seaborn as sns
+# Add these imports at the top of the script
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend before importing pyplot
+
 import matplotlib.pyplot as plt
+import seaborn as sns
 import json
 import requests
 from sklearn.cluster import KMeans
@@ -160,30 +165,39 @@ def visualize_data(df, output_folder):
     """
     Create basic visualizations without using interactive backends.
     """
-    # Select only numerical columns
-    numerical_cols = df.select_dtypes(include=[np.number]).columns
+    try:
+        # Ensure output folder exists
+        os.makedirs(output_folder, exist_ok=True)
+        
+        # Select only numerical columns
+        numerical_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        
+        if len(numerical_cols) > 1:
+            # Create a correlation heatmap
+            plt.figure(figsize=(10, 8), dpi=100)
+            correlation_matrix = df[numerical_cols].corr()
+            sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', linewidths=0.5)
+            plt.title('Correlation Heatmap')
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_folder, "correlation_heatmap.png"))
+            plt.close()  # Close the plot to free up memory
+            print("Correlation heatmap saved.")
+        
+        # Optional: Box plots for numerical columns
+        if numerical_cols:
+            plt.figure(figsize=(12, 6), dpi=100)
+            df[numerical_cols].boxplot()
+            plt.title('Box Plots of Numerical Columns')
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_folder, "boxplots.png"))
+            plt.close()  # Close the plot to free up memory
+            print("Box plots saved.")
     
-    if len(numerical_cols) > 1:
-        # Create a correlation heatmap instead of pairplot
-        plt.figure(figsize=(10, 8))
-        correlation_matrix = df[numerical_cols].corr()
-        sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', linewidths=0.5)
-        plt.title('Correlation Heatmap')
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_folder, "correlation_heatmap.png"))
-        plt.close()  # Close the plot to free up memory
-        print("Correlation heatmap saved.")
-    
-    # Optional: Box plots for numerical columns
-    if len(numerical_cols) > 0:
-        plt.figure(figsize=(12, 6))
-        df[numerical_cols].boxplot()
-        plt.title('Box Plots of Numerical Columns')
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_folder, "boxplots.png"))
-        plt.close()  # Close the plot to free up memory
-        print("Box plots saved.")
+    except Exception as e:
+        print(f"Error in visualize_data: {e}")
+        # Ensure the function doesn't halt the entire script
+        pass
 
 def perform_cluster_analysis(df, output_folder):
     """
