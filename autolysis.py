@@ -7,9 +7,6 @@
 #   "requests",
 #   "pillow",
 #   "scikit-learn",
-#   "networkx",
-#   "geopandas", 
-#   "shapely",
 # ]
 # ///
 
