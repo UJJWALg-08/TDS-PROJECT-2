@@ -158,11 +158,32 @@ def perform_dynamic_prompting(analysis_results):
 
 def visualize_data(df, output_folder):
     """
-    Create basic visualizations.
+    Create basic visualizations without using interactive backends.
     """
-    sns.pairplot(df.select_dtypes(include=[np.number]).dropna())
-    plt.savefig(os.path.join(output_folder, "pairplot.png"))
-    print("Pairplot saved.")
+    # Select only numerical columns
+    numerical_cols = df.select_dtypes(include=[np.number]).columns
+    
+    if len(numerical_cols) > 1:
+        # Create a correlation heatmap instead of pairplot
+        plt.figure(figsize=(10, 8))
+        correlation_matrix = df[numerical_cols].corr()
+        sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', linewidths=0.5)
+        plt.title('Correlation Heatmap')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_folder, "correlation_heatmap.png"))
+        plt.close()  # Close the plot to free up memory
+        print("Correlation heatmap saved.")
+    
+    # Optional: Box plots for numerical columns
+    if len(numerical_cols) > 0:
+        plt.figure(figsize=(12, 6))
+        df[numerical_cols].boxplot()
+        plt.title('Box Plots of Numerical Columns')
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_folder, "boxplots.png"))
+        plt.close()  # Close the plot to free up memory
+        print("Box plots saved.")
 
 def perform_cluster_analysis(df, output_folder):
     """
