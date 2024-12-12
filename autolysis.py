@@ -7,6 +7,9 @@
 #   "requests",
 #   "pillow",
 #   "scikit-learn",
+#   "networkx",
+#   "geopandas", 
+#   "shapely",
 # ]
 # ///
 
@@ -37,6 +40,27 @@ def set_aiproxy_token():
     print("AI Proxy token successfully set!")
     return AIPROXY_TOKEN
 
+def query_llm(prompt, token):
+    """Query the LLM for insights."""
+    url = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 2000,
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except requests.exceptions.RequestException as e:
+        print(f"Error communicating with AI Proxy: {e}")
+        return ""
 
 def create_output_folder(csv_filename):
     """
@@ -46,7 +70,6 @@ def create_output_folder(csv_filename):
     os.makedirs(folder_name, exist_ok=True)
     print(f"Output folder '{folder_name}' created.")
     return folder_name
-
 
 def load_csv(filename, encodings_to_try=None):
     """
@@ -71,7 +94,6 @@ def load_csv(filename, encodings_to_try=None):
 
     raise ValueError(f"Could not load CSV file {filename} with any of the attempted encodings")
 
-
 def analyze_data_structure(df):
     """
     Analyze the structure of the dataset.
@@ -85,6 +107,27 @@ def analyze_data_structure(df):
         "unique_values": {col: df[col].nunique() for col in df.columns}
     }
 
+def compute_statistical_summaries(df):
+    """
+    Compute statistical summaries for numerical columns.
+    """
+    return df.describe(include='all').transpose().to_dict()
+
+def detect_outliers(df, z_threshold=3):
+    """
+    Detect outliers in numerical columns using z-score method.
+    """
+    outliers = {}
+    for column in df.select_dtypes(include=[np.number]):
+        z_scores = (df[column] - df[column].mean()) / df[column].std()
+        outlier_indices = z_scores.abs() > z_threshold
+        outliers[column] = {
+            "total_outliers": outlier_indices.sum(),
+            "indices": list(df.index[outlier_indices]),
+            "lower_bound": df[column].mean() - z_threshold * df[column].std(),
+            "upper_bound": df[column].mean() + z_threshold * df[column].std()
+        }
+    return outliers
 
 def generate_significant_findings(data_summary, statistical_summary, outliers):
     """
@@ -95,8 +138,7 @@ def generate_significant_findings(data_summary, statistical_summary, outliers):
     # Example: Outliers
     if outliers:
         for column, details in outliers.items():
-            insights.append(f"Column '{column}' has {details['total_outliers']} significant outliers "
-                            f"exceeding the bounds [{details['lower_bound']}, {details['upper_bound']}].")
+            insights.append(f"Column '{column}' has {details['total_outliers']} significant outliers exceeding the bounds [{details['lower_bound']}, {details['upper_bound']}].")
 
     # Example: Missing values
     missing_cols = [col for col, count in data_summary['missing_values'].items() if count > 0]
@@ -105,17 +147,47 @@ def generate_significant_findings(data_summary, statistical_summary, outliers):
 
     return "\n".join(insights)
 
-
 def perform_dynamic_prompting(analysis_results):
     """
     Dynamically adjust the script based on runtime analysis.
     """
-    # Example: Adjust clustering parameters based on data shape
     num_rows = analysis_results["num_rows"]
     if num_rows < 100:
         print("Adjusting clustering parameters for small dataset.")
         # Placeholder for dynamically changing parameters or LLM prompt behavior
 
+def visualize_data(df, output_folder):
+    """
+    Create basic visualizations.
+    """
+    sns.pairplot(df.select_dtypes(include=[np.number]).dropna())
+    plt.savefig(os.path.join(output_folder, "pairplot.png"))
+    print("Pairplot saved.")
+
+def perform_cluster_analysis(df, output_folder):
+    """
+    Perform clustering analysis and save results.
+    """
+    numerical_data = df.select_dtypes(include=[np.number]).dropna()
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(numerical_data)
+    kmeans = KMeans(n_clusters=3, random_state=42)
+    clusters = kmeans.fit_predict(scaled_data)
+    df['Cluster'] = clusters
+    df.to_csv(os.path.join(output_folder, "clustered_data.csv"), index=False)
+    print("Clustering completed.")
+
+def generate_story_report(data_summary, statistical_summary, outliers, df, output_folder, dataset_name):
+    """
+    Generate a storytelling-style report.
+    """
+    report_path = os.path.join(output_folder, f"{dataset_name}_report.txt")
+    with open(report_path, "w") as report_file:
+        report_file.write(f"Dataset Report for {dataset_name}\n")
+        report_file.write(f"Data Summary: {data_summary}\n")
+        report_file.write(f"Statistical Summary: {statistical_summary}\n")
+        report_file.write(f"Outliers: {outliers}\n")
+    print(f"Report saved to {report_path}.")
 
 def main():
     """
@@ -126,7 +198,7 @@ def main():
     args = parser.parse_args()
 
     # Set AI Proxy Token
-    set_aiproxy_token()
+    token = set_aiproxy_token()
 
     # Create output folder using CSV filename
     output_folder = create_output_folder(os.path.basename(args.dataset_path))
@@ -163,7 +235,6 @@ def main():
         output_folder,
         os.path.basename(args.dataset_path)
     )
-
 
 if __name__ == "__main__":
     main()
