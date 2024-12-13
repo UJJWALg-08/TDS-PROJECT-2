@@ -11,6 +11,7 @@
 #   "rich",
 #   "tenacity",
 #   "openai",
+#   "tabulate"
 # ]
 # ///
 
@@ -34,6 +35,7 @@ from rich.console import Console
 from dateutil import parser
 import chardet
 from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
+from tabulate import tabulate
 import logging
 
 # Initialize console for rich logging
@@ -184,37 +186,44 @@ def perform_pca(data):
     plt.figure(figsize=(8, 6))
     sns.scatterplot(x='PCA1', y='PCA2', hue='Cluster', data=data, palette='tab10')
     plt.title("PCA Scatterplot")
-    plt.savefig("pca_scatterplot.png")
-    plt.close()
+    return "pca_scatterplot.png"
 
-    return data
-
-def visualize_data(data):
+def visualize_data(data, output_dir):
     """Generate advanced visualizations."""
     numeric_data = data.select_dtypes(include='number')
+
+    visualizations = []
 
     if not numeric_data.empty:
         console.log("[cyan]Generating correlation heatmap...")
         plt.figure(figsize=(10, 8))
         sns.heatmap(numeric_data.corr(), annot=True, cmap="coolwarm")
         plt.title("Correlation Heatmap")
-        plt.savefig("correlation_heatmap.png")
+        heatmap_path = os.path.join(output_dir, "correlation_heatmap.png")
+        plt.savefig(heatmap_path)
         plt.close()
+        visualizations.append(heatmap_path)
 
         console.log("[cyan]Generating boxplot...")
         plt.figure(figsize=(12, 6))
         sns.boxplot(data=numeric_data)
         plt.title("Boxplot of Numeric Data")
-        plt.savefig("boxplot.png")
+        boxplot_path = os.path.join(output_dir, "boxplot.png")
+        plt.savefig(boxplot_path)
         plt.close()
+        visualizations.append(boxplot_path)
 
         console.log("[cyan]Generating histograms...")
+        histograms_path = os.path.join(output_dir, "histograms.png")
         numeric_data.hist(figsize=(12, 10), bins=20, color='teal')
-        plt.savefig("histograms.png")
+        plt.savefig(histograms_path)
         plt.close()
+        visualizations.append(histograms_path)
 
     else:
         console.log("[yellow]No numeric data available for visualizations.")
+
+    return visualizations
 
 def query_llm(prompt):
     """Queries the LLM for insights and returns the response."""
@@ -251,31 +260,39 @@ def create_story(analysis, visualizations_summary):
         f"### Data Summary:\nShape: {analysis['shape']}\n"
         f"Columns: {', '.join(list(analysis['columns'].keys()))}\n"
         f"Missing Values: {str(analysis['missing_values'])}\n\n"
-        f"### Key Summary Statistics:\nTop 3 Columns:\n{pd.DataFrame(analysis['summary_statistics']).iloc[:, :3].to_string()}\n\n"
+        f"### Key Summary Statistics:\n{tabulate(pd.DataFrame(analysis['summary_statistics']).iloc[:, :3], headers='keys', tablefmt='grid')}\n\n"
         f"### Visualizations:\nCorrelation heatmap, Pairplot, Clustering Scatter Plot.\n\n"
         "Based on the above, provide a detailed narrative including insights and potential actions."
     )
 
     return query_llm(prompt)
 
-def save_results(analysis, visualizations, story):
-    """Save results to README.md."""
-    with open("README.md", "w") as f:
+def save_results(output_dir, analysis, visualizations, story):
+    """Save results to README.md and the output folder."""
+    readme_path = os.path.join(output_dir, "README.md")
+    with open(readme_path, "w") as f:
         f.write("# Automated Data Analysis Report\n\n")
         f.write("## Data Overview\n")
         f.write(f"**Shape**: {analysis['shape']}\n\n")
         f.write("## Summary Statistics\n")
-        f.write(pd.DataFrame(analysis["summary_statistics"]).to_markdown())
-        f.write("## Narrative\n")
-        f.write(str(story))  # if story is a list of strings
-        f.write("## Visualizations\n")
+        f.write(tabulate(pd.DataFrame(analysis["summary_statistics"]).reset_index(), headers='keys', tablefmt='github'))
+        f.write("\n\n## Narrative\n")
+        f.write(story)
+        f.write("\n\n## Visualizations\n")
         for viz in visualizations:
-            f.write(f"- ![Visualization]({viz})\n")
+            f.write(f"- ![Visualization]({os.path.basename(viz)})\n")
+
+def create_output_folder(file_path):
+    """Create a structured output folder named after the input file."""
+    output_dir = os.path.splitext(os.path.basename(file_path))[0]
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    return output_dir
 
 def main():
     console.log("[cyan]Starting script...")
     if len(sys.argv) != 2:
-        console.log("[red]Usage: uv run autolysis.py dataset.csv")
+        console.log("[red]Usage: python autolysis.py dataset.csv")
         sys.exit(1)
 
     file_path = sys.argv[1]
@@ -283,11 +300,15 @@ def main():
     df = read_csv(file_path)
     console.log("[green]Dataframe loaded.[/]")
 
+    # Create output folder
+    output_dir = create_output_folder(file_path)
+
     df = clean_data(df)
     df = detect_outliers(df)
     df = perform_clustering(df)
-    df = perform_pca(df)
-    visualize_data(df)
+    pca_path = perform_pca(df)
+    visualizations = visualize_data(df, output_dir)
+    visualizations.append(os.path.join(output_dir, pca_path))
 
     analysis = {
         "shape": df.shape,
@@ -296,9 +317,8 @@ def main():
         "summary_statistics": df.describe(include="all").to_dict(),
     }
 
-    visualizations = ["correlation_heatmap.png", "boxplot.png", "histograms.png", "pca_scatterplot.png"]
     story = create_story(analysis, visualizations)
-    save_results(analysis, visualizations, story)
+    save_results(output_dir, analysis, visualizations, story)
 
     console.log("[green]Analysis completed successfully.")
 
