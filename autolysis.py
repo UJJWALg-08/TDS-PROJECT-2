@@ -50,8 +50,8 @@ AIPROXY_TOKEN = os.environ.get("AIPROXY_TOKEN")
 if not AIPROXY_TOKEN:
     raise EnvironmentError("AIPROXY_TOKEN is not set. Please set it before running the script.")
 
+# Retry settings
 def retry_settings_with_logging():
-    """Configures retry mechanism with logging."""
     return retry(
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=4, max=10),
@@ -67,7 +67,7 @@ def detect_encoding(file_path):
 
 @retry_settings_with_logging()
 def read_csv(file_path):
-    """Read a CSV file with automatic encoding detection and flexible date parsing."""
+    """Read a CSV file with automatic encoding detection and flexible date parsing using regex."""
     try:
         console.log("Detecting file encoding...")
         encoding = detect_encoding(file_path)
@@ -75,7 +75,7 @@ def read_csv(file_path):
 
         df = pd.read_csv(file_path, encoding=encoding, encoding_errors='replace')
 
-        # Enhanced date parsing
+        # Attempt to parse date columns using regex
         for column in df.columns:
             if df[column].dtype == object and is_date_column(df[column]):
                 console.log(f"Parsing dates in column: {column}")
@@ -88,12 +88,12 @@ def read_csv(file_path):
         sys.exit(1)
 
 def parse_date_with_regex(date_str):
-    """Advanced date parsing with multiple strategies."""
-    if not isinstance(date_str, str):
-        return date_str
+    """Parse a date string using regex patterns to identify different date formats."""
+    if not isinstance(date_str, str):  # Skip non-string values (e.g., NaN, float)
+        return date_str  # Return the value as-is
 
     if not re.search(r'\d', date_str):
-        return np.nan
+        return np.nan  # If no digits are found, it's not likely a date
 
     patterns = [
         (r"\d{2}-[A-Za-z]{3}-\d{4}", "%d-%b-%Y"),
@@ -108,28 +108,23 @@ def parse_date_with_regex(date_str):
             try:
                 return pd.to_datetime(date_str, format=date_format, errors='coerce')
             except Exception as e:
-                console.log(f"Date parsing error: {date_str}, {e}")
+                console.log(f"Error parsing date: {date_str} with format {date_format}. Error: {e}")
                 return np.nan
 
     try:
         return parser.parse(date_str, fuzzy=True, dayfirst=False)
     except Exception as e:
-        console.log(f"Fuzzy date parsing error: {date_str}, {e}")
+        console.log(f"Error parsing date with dateutil: {date_str}. Error: {e}")
         return np.nan
 
 def is_date_column(column):
-    """Enhanced date column detection."""
+    """Determines whether a column likely contains dates based on column name or content."""
     if isinstance(column, str):
         if any(keyword in column.lower() for keyword in ['date', 'time', 'timestamp']):
             return True
 
     sample_values = column.dropna().head(10)
-    date_patterns = [
-        r"\d{2}-[A-Za-z]{3}-\d{2}", 
-        r"\d{2}-[A-Za-z]{3}-\d{4}", 
-        r"\d{4}-\d{2}-\d{2}", 
-        r"\d{2}/\d{2}/\d{4}"
-    ]
+    date_patterns = [r"\d{2}-[A-Za-z]{3}-\d{2}", r"\d{2}-[A-Za-z]{3}-\d{4}", r"\d{4}-\d{2}-\d{2}", r"\d{2}/\d{2}/\d{4}"]
 
     for value in sample_values:
         if isinstance(value, str):
@@ -139,200 +134,193 @@ def is_date_column(column):
     return False
 
 def clean_data(data):
-    """Enhanced data cleaning with more robust strategies."""
-    console.log("[cyan]Advanced Data Cleaning...")
+    """Handle missing or invalid data."""
+    console.log("[cyan]Cleaning data...")
     data = data.drop_duplicates()
-    
-    # Identify numeric and categorical columns
-    numeric_columns = data.select_dtypes(include=[np.number]).columns
-    categorical_columns = data.select_dtypes(include=['object']).columns
-    
-    # Fill missing values differently for numeric and categorical
-    data[numeric_columns] = data[numeric_columns].fillna(data[numeric_columns].median())
-    data[categorical_columns] = data[categorical_columns].fillna(data[categorical_columns].mode().iloc[0])
-    
+    data = data.dropna(how='all')
+    data.fillna(data.median(numeric_only=True), inplace=True)
     return data
 
-def detect_outliers(data, contamination_rate=0.05):
-    """Advanced outlier detection with configurable contamination."""
-    numeric_data = data.select_dtypes(include=[np.number])
-    
+def detect_outliers(data):
+    """Detect outliers using Isolation Forest."""
+    numeric_data = data.select_dtypes(include='number')
     if numeric_data.empty:
-        console.log("[yellow]No numeric data for outlier detection.")
+        console.log("[yellow]No numeric data found for outlier detection.")
         return data
 
-    console.log("[cyan]Performing Advanced Outlier Detection...")
-    
-    # Use Isolation Forest with adaptable contamination
-    model = IsolationForest(
-        contamination=contamination_rate, 
-        random_state=42,
-        max_samples='auto',
-        bootstrap=True
-    )
-    
+    console.log("[cyan]Performing outlier detection...")
+    model = IsolationForest(contamination=0.05, random_state=42)
     outliers = model.fit_predict(numeric_data)
     data['Outlier'] = (outliers == -1)
-    
-    # Log outlier statistics
-    outlier_count = sum(data['Outlier'])
-    console.log(f"[yellow]Detected {outlier_count} outliers out of {len(data)} records.")
-    
     return data
 
-def perform_clustering(data, n_clusters=3):
-    """Adaptive clustering with dynamic cluster determination."""
-    numeric_data = data.select_dtypes(include=[np.number])
-    
+def perform_clustering(data):
+    """Perform KMeans clustering on numeric data."""
+    numeric_data = data.select_dtypes(include='number')
     if numeric_data.shape[1] < 2:
         console.log("[yellow]Insufficient numeric features for clustering.")
         return data
 
-    console.log("[cyan]Performing Adaptive Clustering...")
-    
-    # Scale data
+    console.log("[cyan]Performing clustering...")
     scaler = StandardScaler()
     scaled_data = scaler.fit_transform(numeric_data)
-    
-    # Use adaptive number of clusters based on data size
-    adapted_clusters = min(n_clusters, len(numeric_data) // 10)
-    
-    kmeans = KMeans(
-        n_clusters=adapted_clusters, 
-        random_state=42, 
-        n_init='auto',
-        algorithm='elkan'
-    )
-    
+    kmeans = KMeans(n_clusters=3, random_state=42, n_init='auto')
     data['Cluster'] = kmeans.fit_predict(scaled_data)
-    
     return data
 
-def query_llm(prompt, max_tokens=300, temperature=0.7):
-    """Enhanced LLM query with token and creativity control."""
+def perform_pca(data):
+    """Perform Principal Component Analysis (PCA) on numeric data."""
+    numeric_data = data.select_dtypes(include='number')
+    if numeric_data.shape[1] < 2:
+        console.log("[yellow]Insufficient numeric features for PCA.")
+        return data
+
+    console.log("[cyan]Performing PCA...")
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(numeric_data)
+    pca = PCA(n_components=2)
+    components = pca.fit_transform(scaled_data)
+    data['PCA1'] = components[:, 0]
+    data['PCA2'] = components[:, 1]
+
+    plt.figure(figsize=(8, 6))
+    sns.scatterplot(x='PCA1', y='PCA2', hue='Cluster', data=data, palette='tab10')
+    plt.title("PCA Scatterplot")
+    return "pca_scatterplot.png"
+
+def visualize_data(data, output_dir):
+    """Generate advanced visualizations."""
+    numeric_data = data.select_dtypes(include='number')
+
+    visualizations = []
+
+    if not numeric_data.empty:
+        console.log("[cyan]Generating correlation heatmap...")
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(numeric_data.corr(), annot=True, cmap="coolwarm")
+        plt.title("Correlation Heatmap")
+        heatmap_path = os.path.join(output_dir, "correlation_heatmap.png")
+        plt.savefig(heatmap_path)
+        plt.close()
+        visualizations.append(heatmap_path)
+
+        console.log("[cyan]Generating boxplot...")
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(data=numeric_data)
+        plt.title("Boxplot of Numeric Data")
+        boxplot_path = os.path.join(output_dir, "boxplot.png")
+        plt.savefig(boxplot_path)
+        plt.close()
+        visualizations.append(boxplot_path)
+
+        console.log("[cyan]Generating histograms...")
+        histograms_path = os.path.join(output_dir, "histograms.png")
+        numeric_data.hist(figsize=(12, 10), bins=20, color='teal')
+        plt.savefig(histograms_path)
+        plt.close()
+        visualizations.append(histograms_path)
+
+    else:
+        console.log("[yellow]No numeric data available for visualizations.")
+
+    return visualizations
+
+def query_llm(prompt):
+    """Queries the LLM for insights and returns the response."""
     try:
         url = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {AIPROXY_TOKEN}",
             "Content-Type": "application/json",
         }
-        
         payload = {
             "model": "gpt-4o-mini",
-            "max_tokens": max_tokens,
-            "temperature": temperature,
             "messages": [
-                {
-                    "role": "system", 
-                    "content": "You are a precise, insightful data analysis assistant. "
-                               "Provide concise, structured insights. Use bullet points. "
-                               "Focus on the most significant findings."
-                },
+                {"role": "system", "content": "You are a helpful data analysis assistant."},
                 {"role": "user", "content": prompt},
             ],
         }
-        
         payload_json = json.dumps(payload)
         result = subprocess.run(
-            ["curl", "-X", "POST", url, 
-             "-H", f"Authorization: Bearer {AIPROXY_TOKEN}", 
-             "-H", "Content-Type: application/json", 
-             "-d", payload_json],
+            ["curl", "-X", "POST", url, "-H", f"Authorization: Bearer {AIPROXY_TOKEN}", "-H", "Content-Type: application/json", "-d", payload_json],
             capture_output=True, text=True
         )
-        
         if result.returncode == 0:
             response_data = json.loads(result.stdout)
             return response_data["choices"][0]["message"]["content"]
         else:
             raise Exception(f"Error in curl request: {result.stderr}")
-    
     except Exception as e:
         console.log(f"[red]Error querying AI Proxy: {e}[/]")
         return "Error: Unable to generate narrative."
 
-def create_multi_stage_narrative(analysis, visualizations):
-    """Multi-stage narrative generation with targeted LLM interactions."""
-    # Stage 1: Initial Overview
-    overview_prompt = (
-        f"Provide a high-level overview of this dataset:\n"
-        f"Total Records: {analysis['shape'][0]}\n"
-        f"Features: {', '.join(analysis['columns'].keys())}\n"
-        "Focus on potential insights and interesting patterns."
+def create_story(analysis, visualizations_summary):
+    """Creates a narrative using LLM based on analysis and visualizations."""
+    prompt = (
+        f"### Data Summary:\nShape: {analysis['shape']}\n"
+        f"Columns: {', '.join(list(analysis['columns'].keys()))}\n"
+        f"Missing Values: {str(analysis['missing_values'])}\n\n"
+        f"### Key Summary Statistics:\n{tabulate(pd.DataFrame(analysis['summary_statistics']).iloc[:, :3], headers='keys', tablefmt='grid')}\n\n"
+        f"### Visualizations:\nCorrelation heatmap, Pairplot, Clustering Scatter Plot.\n\n"
+        "Based on the above, provide a detailed narrative including insights and potential actions."
     )
-    overview = query_llm(overview_prompt, max_tokens=200)
-    
-    # Stage 2: Detailed Analysis
-    detailed_prompt = (
-        f"Based on the dataset overview and these summary statistics:\n"
-        f"{json.dumps(analysis['summary_statistics'], indent=2)}\n\n"
-        "Extract the TOP 3 most significant insights. "
-        "Explain why these insights matter and potential actions."
-    )
-    detailed_insights = query_llm(detailed_prompt, max_tokens=300)
-    
-    # Stage 3: Predictive Narrative
-    predictive_prompt = (
-        "Considering the current dataset characteristics, "
-        "suggest potential predictive models or further analyses "
-        "that could provide valuable business or research insights."
-    )
-    predictive_suggestions = query_llm(predictive_prompt, max_tokens=200)
-    
-    # Combine stages
-    full_narrative = f"""
-    # Comprehensive Data Analysis Report
 
-    ## Overview
-    {overview}
+    return query_llm(prompt)
 
-    ## Key Insights
-    {detailed_insights}
+def save_results(output_dir, analysis, visualizations, story):
+    """Save results to README.md and the output folder."""
+    readme_path = os.path.join(output_dir, "README.md")
+    with open(readme_path, "w") as f:
+        f.write("# Automated Data Analysis Report\n\n")
+        f.write("## Data Overview\n")
+        f.write(f"**Shape**: {analysis['shape']}\n\n")
+        f.write("## Summary Statistics\n")
+        f.write(tabulate(pd.DataFrame(analysis["summary_statistics"]).reset_index(), headers='keys', tablefmt='github'))
+        f.write("\n\n## Narrative\n")
+        f.write(story)
+        f.write("\n\n## Visualizations\n")
+        for viz in visualizations:
+            f.write(f"- ![Visualization]({os.path.basename(viz)})\n")
 
-    ## Future Directions
-    {predictive_suggestions}
-    """
-    
-    return full_narrative
+def create_output_folder(file_path):
+    """Create a structured output folder named after the input file."""
+    output_dir = os.path.splitext(os.path.basename(file_path))[0]
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    return output_dir
 
 def main():
-    console.log("[cyan]Starting Advanced Data Analysis Script...")
-    
+    console.log("[cyan]Starting script...")
     if len(sys.argv) != 2:
-        console.log("[red]Usage: python advanced_data_analysis.py dataset.csv")
+        console.log("[red]Usage: python autolysis.py dataset.csv")
         sys.exit(1)
 
     file_path = sys.argv[1]
-    console.log(f"[yellow]Analyzing file: {file_path}[/]")
-    
+    console.log(f"[yellow]Reading file: {file_path}[/]")
     df = read_csv(file_path)
+    console.log("[green]Dataframe loaded.[/]")
+
+    # Create output folder
     output_dir = create_output_folder(file_path)
-    
-    # Adaptive preprocessing
+
     df = clean_data(df)
     df = detect_outliers(df)
     df = perform_clustering(df)
-    
+    pca_path = perform_pca(df)
+    visualizations = visualize_data(df, output_dir)
+    visualizations.append(os.path.join(output_dir, pca_path))
+
     analysis = {
         "shape": df.shape,
         "columns": df.dtypes.to_dict(),
+        "missing_values": df.isnull().sum().to_dict(),
         "summary_statistics": df.describe(include="all").to_dict(),
     }
-    
-    # Visualization and analysis
-    pca_path = perform_pca(df)
-    visualizations = visualize_data(df, output_dir)
-    visualizations.append(pca_path)
-    
-    # Multi-stage narrative generation
-    story = create_multi_stage_narrative(analysis, visualizations)
-    
-    # Save comprehensive results
-    save_results(output_dir, analysis, visualizations, story)
-    
-    console.log("[green]Advanced Analysis Completed Successfully!")
 
-# Rest of the functions remain the same as in the previous script...
+    story = create_story(analysis, visualizations)
+    save_results(output_dir, analysis, visualizations, story)
+
+    console.log("[green]Analysis completed successfully.")
 
 if __name__ == "__main__":
     main()
