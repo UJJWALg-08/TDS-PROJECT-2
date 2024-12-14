@@ -567,39 +567,7 @@ class AdvancedDataAnalyzer:
         return report
 
 
-if len(sys.argv) < 2:
-    print("Error: Please provide the CSV file path as a command-line argument.")
-    sys.exit(1)
 
-csv_file_path = sys.argv[1]  # The first argument after the script name
-csv_filename = os.path.splitext(os.path.basename(csv_file_path))[0]  # Extract filename without extension
-
-# 2. Create a directory named after the CSV file
-output_folder = os.path.join(os.getcwd(), csv_filename)
-os.makedirs(output_folder, exist_ok=True)  # Create folder if it doesn't exist
-
-# 3. Paths for the images and README file
-png1_path = os.path.join(output_folder, 'image1.png')
-png2_path = os.path.join(output_folder, 'image2.png')
-png3_path = os.path.join(output_folder, 'image3.png')
-readme_path = os.path.join(output_folder, 'README.txt')
-
-# 4. Save PNG files and README in this folder
-# Replace this part with your actual logic for image generation
-plt.figure()
-plt.plot([1, 2, 3], [4, 5, 6])
-plt.savefig(png1_path)
-plt.close()
-
-plt.figure()
-plt.plot([1, 2, 3], [6, 5, 4])
-plt.savefig(png2_path)
-plt.close()
-
-plt.figure()
-plt.plot([1, 2, 3], [2, 4, 6])
-plt.savefig(png3_path)
-plt.close()
 
 def main():
 
