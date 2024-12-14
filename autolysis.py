@@ -38,19 +38,14 @@ from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_l
 from tabulate import tabulate
 import logging
 
-# Initialize console for rich logging
 console = Console()
-
-# Configure logging for tenacity
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Environment variable for AI Proxy token
 AIPROXY_TOKEN = os.environ.get("AIPROXY_TOKEN")
 if not AIPROXY_TOKEN:
     raise EnvironmentError("AIPROXY_TOKEN is not set. Please set it before running the script.")
 
-# Retry settings
 def retry_settings_with_logging():
     return retry(
         stop=stop_after_attempt(5),
@@ -60,14 +55,12 @@ def retry_settings_with_logging():
 
 @retry_settings_with_logging()
 def detect_encoding(file_path):
-    """Detect the encoding of a CSV file."""
     with open(file_path, 'rb') as file:
         result = chardet.detect(file.read())
         return result['encoding']
 
 @retry_settings_with_logging()
 def read_csv(file_path):
-    """Read a CSV file with automatic encoding detection and flexible date parsing using regex."""
     try:
         console.log("Detecting file encoding...")
         encoding = detect_encoding(file_path)
@@ -75,7 +68,6 @@ def read_csv(file_path):
 
         df = pd.read_csv(file_path, encoding=encoding, encoding_errors='replace')
 
-        # Attempt to parse date columns using regex
         for column in df.columns:
             if df[column].dtype == object and is_date_column(df[column]):
                 console.log(f"Parsing dates in column: {column}")
@@ -88,12 +80,11 @@ def read_csv(file_path):
         sys.exit(1)
 
 def parse_date_with_regex(date_str):
-    """Parse a date string using regex patterns to identify different date formats."""
-    if not isinstance(date_str, str):  # Skip non-string values (e.g., NaN, float)
-        return date_str  # Return the value as-is
+    if not isinstance(date_str, str):  
+        return date_str  
 
     if not re.search(r'\d', date_str):
-        return np.nan  # If no digits are found, it's not likely a date
+        return np.nan  
 
     patterns = [
         (r"\d{2}-[A-Za-z]{3}-\d{4}", "%d-%b-%Y"),
@@ -118,7 +109,6 @@ def parse_date_with_regex(date_str):
         return np.nan
 
 def is_date_column(column):
-    """Determines whether a column likely contains dates based on column name or content."""
     if isinstance(column, str):
         if any(keyword in column.lower() for keyword in ['date', 'time', 'timestamp']):
             return True
@@ -134,7 +124,6 @@ def is_date_column(column):
     return False
 
 def clean_data(data):
-    """Handle missing or invalid data."""
     console.log("[cyan]Cleaning data...")
     data = data.drop_duplicates()
     data = data.dropna(how='all')
@@ -142,7 +131,6 @@ def clean_data(data):
     return data
 
 def detect_outliers(data):
-    """Detect outliers using Isolation Forest."""
     numeric_data = data.select_dtypes(include='number')
     if numeric_data.empty:
         console.log("[yellow]No numeric data found for outlier detection.")
@@ -155,7 +143,6 @@ def detect_outliers(data):
     return data
 
 def perform_clustering(data):
-    """Perform KMeans clustering on numeric data."""
     numeric_data = data.select_dtypes(include='number')
     if numeric_data.shape[1] < 2:
         console.log("[yellow]Insufficient numeric features for clustering.")
@@ -169,7 +156,6 @@ def perform_clustering(data):
     return data
 
 def perform_pca(data):
-    """Perform Principal Component Analysis (PCA) on numeric data."""
     numeric_data = data.select_dtypes(include='number')
     if numeric_data.shape[1] < 2:
         console.log("[yellow]Insufficient numeric features for PCA.")
@@ -189,7 +175,6 @@ def perform_pca(data):
     return "pca_scatterplot.png"
 
 def visualize_data(data, output_dir):
-    """Generate advanced visualizations."""
     numeric_data = data.select_dtypes(include='number')
 
     visualizations = []
@@ -226,7 +211,6 @@ def visualize_data(data, output_dir):
     return visualizations
 
 def query_llm(prompt):
-    """Queries the LLM for insights and returns the response."""
     try:
         url = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
         headers = {
@@ -234,7 +218,7 @@ def query_llm(prompt):
             "Content-Type": "application/json",
         }
         payload = {
-            "model": "gpt-4o-mini",
+            "model": "gpt-4-0-mini",
             "messages": [
                 {"role": "system", "content": "You are a helpful data analysis assistant."},
                 {"role": "user", "content": prompt},
@@ -255,20 +239,19 @@ def query_llm(prompt):
         return "Error: Unable to generate narrative."
 
 def create_story(analysis, visualizations_summary):
-    """Creates a narrative using LLM based on analysis and visualizations."""
     prompt = (
         f"### Data Summary:\nShape: {analysis['shape']}\n"
         f"Columns: {', '.join(list(analysis['columns'].keys()))}\n"
         f"Missing Values: {str(analysis['missing_values'])}\n\n"
         f"### Key Summary Statistics:\n{tabulate(pd.DataFrame(analysis['summary_statistics']).iloc[:, :3], headers='keys', tablefmt='grid')}\n\n"
         f"### Visualizations:\nCorrelation heatmap, Pairplot, Clustering Scatter Plot.\n\n"
-        "Based on the above, provide a detailed narrative including insights and potential actions."
+        "Based on the above, provide a detailed narrative including insights and potential actions. "
+        "Please emphasize significant findings and provide recommendations."
     )
 
     return query_llm(prompt)
 
 def save_results(output_dir, analysis, visualizations, story):
-    """Save results to README.md and the output folder."""
     readme_path = os.path.join(output_dir, "README.md")
     with open(readme_path, "w") as f:
         f.write("# Automated Data Analysis Report\n\n")
@@ -283,7 +266,6 @@ def save_results(output_dir, analysis, visualizations, story):
             f.write(f"- ![Visualization]({os.path.basename(viz)})\n")
 
 def create_output_folder(file_path):
-    """Create a structured output folder named after the input file."""
     output_dir = os.path.splitext(os.path.basename(file_path))[0]
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -300,7 +282,6 @@ def main():
     df = read_csv(file_path)
     console.log("[green]Dataframe loaded.[/]")
 
-    # Create output folder
     output_dir = create_output_folder(file_path)
 
     df = clean_data(df)
