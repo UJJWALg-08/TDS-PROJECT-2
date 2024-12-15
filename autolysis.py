@@ -188,6 +188,9 @@ def perform_pca(data):
     plt.figure(figsize=(8, 6))
     sns.scatterplot(x='PCA1', y='PCA2', hue='Cluster', data=data, palette='tab10')
     plt.title("PCA Scatterplot")
+    plt.xlabel("PCA1")
+    plt.ylabel("PCA2")
+    plt.legend(title="Clusters")
     return "pca_scatterplot.png"
 
 
@@ -454,7 +457,7 @@ def create_story(analysis, visualizations, data, has_time_series, statistical_te
         f"- Visualizations generated: Correlation heatmap, boxplot, histograms, PCA scatterplot.\n"
         f"Provide:\n"
         f"- A summary of the most significant findings and patterns, **explicitly referencing the generated visualizations by name and describing the main findings in them**.\n"
-        f"- Recommendations for further analysis, based on the data and the statistical tests.\n"
+        f"- Recommendations for further analysis, based on the data and the statistical tests, **if there are any relevant statistical tests results, mention them by name and describe their implications**.\n"
         f"- If possible, mention any correlations and interesting facts.\n"
         f"You may use any of the following functions to help you perform a more detailed analysis if required."
     )
