@@ -11,7 +11,8 @@
 #   "rich",
 #   "tenacity",
 #   "openai",
-#   "tabulate"
+#   "tabulate",
+#   "requests"
 # ]
 # ///
 
@@ -20,7 +21,6 @@ import sys
 import re
 import json
 import base64
-import subprocess
 import pandas as pd
 import numpy as np
 import seaborn as sns
@@ -37,7 +37,8 @@ import chardet
 from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
 from tabulate import tabulate
 import logging
-from scipy.stats import ttest_ind, pearsonr
+from scipy.stats import ttest_ind, pearsonr, shapiro, levene
+import requests
 
 # Initialize console for rich logging
 console = Console()
@@ -205,12 +206,39 @@ def perform_statistical_tests(data):
       for col2_idx in range(col1_idx + 1, numeric_data.shape[1]):
           col1 = numeric_data.columns[col1_idx]
           col2 = numeric_data.columns[col2_idx]
+          
+          sample1 = numeric_data[col1].dropna()
+          sample2 = numeric_data[col2].dropna()
+
+          if len(sample1) < 2 or len(sample2) < 2:
+                results[(f"t-test({col1},{col2})")] = "Skipped: Insufficient data"
+                continue
+          
           try:
-            t_stat, p_value = ttest_ind(numeric_data[col1].dropna(), numeric_data[col2].dropna(), equal_var=False)
-            results[(f"t-test({col1},{col2})")] = {
-                "t_statistic": float(t_stat),
-                "p_value": float(p_value)
-            }
+              # Check for normality using Shapiro-Wilk
+              stat1, p_norm1 = shapiro(sample1)
+              stat2, p_norm2 = shapiro(sample2)
+              
+              alpha = 0.05
+              if p_norm1 < alpha or p_norm2 < alpha:
+                  results[(f"t-test({col1},{col2})")] = "Skipped: Normality assumption not met"
+                  continue
+
+              # Check for equal variances using Levene
+              stat_var, p_var = levene(sample1, sample2)
+
+              if p_var < alpha:
+                   t_stat, p_value = ttest_ind(sample1, sample2, equal_var=False)
+              else:
+                  t_stat, p_value = ttest_ind(sample1, sample2, equal_var=True)
+
+              results[(f"t-test({col1},{col2})")] = {
+                  "t_statistic": float(t_stat),
+                  "p_value": float(p_value),
+                  "normality_p_sample_1": float(p_norm1),
+                  "normality_p_sample_2": float(p_norm2),
+                  "variance_p_value": float(p_var),
+              }
           except Exception as e:
             results[(f"t-test({col1},{col2})")] = f"Error: {e}"
 
@@ -219,15 +247,22 @@ def perform_statistical_tests(data):
         for col2_idx in range(col1_idx + 1, numeric_data.shape[1]):
           col1 = numeric_data.columns[col1_idx]
           col2 = numeric_data.columns[col2_idx]
+          
+          sample1 = numeric_data[col1].dropna()
+          sample2 = numeric_data[col2].dropna()
+          
+          if len(sample1) < 2 or len(sample2) < 2:
+            results[f"pearson({col1},{col2})"] = "Skipped: Insufficient data"
+            continue
+          
           try:
-            correlation, p_value = pearsonr(numeric_data[col1].dropna(), numeric_data[col2].dropna())
+            correlation, p_value = pearsonr(sample1, sample2)
             results[f"pearson({col1},{col2})"] = {
               "correlation": float(correlation),
               "p_value": float(p_value)
             }
           except Exception as e:
             results[f"pearson({col1},{col2})"] = f"Error: {e}"
-
 
     return results
 
@@ -240,8 +275,10 @@ def visualize_data(data, output_dir):
     if not numeric_data.empty:
         console.log("[cyan]Generating correlation heatmap...")
         plt.figure(figsize=(10, 8))
-        sns.heatmap(numeric_data.corr(), annot=True, cmap="coolwarm")
+        sns.heatmap(numeric_data.corr(), annot=True, cmap="coolwarm", annot_kws={"fontsize":8})
         plt.title("Correlation Heatmap")
+        plt.xticks(rotation=45, ha='right')
+        plt.yticks(rotation=0)
         heatmap_path = os.path.join(output_dir, "correlation_heatmap.png")
         plt.savefig(heatmap_path)
         plt.close()
@@ -251,6 +288,8 @@ def visualize_data(data, output_dir):
         plt.figure(figsize=(12, 6))
         sns.boxplot(data=numeric_data)
         plt.title("Boxplot of Numeric Data")
+        plt.xticks(rotation=45, ha='right')
+        plt.yticks(rotation=0)
         boxplot_path = os.path.join(output_dir, "boxplot.png")
         plt.savefig(boxplot_path)
         plt.close()
@@ -285,25 +324,23 @@ def query_llm(prompt, functions=None):
         }
         if functions:
             payload["functions"] = functions
-        payload_json = json.dumps(payload)
-        result = subprocess.run(
-            ["curl", "-X", "POST", url, "-H", f"Authorization: Bearer {AIPROXY_TOKEN}", "-H", "Content-Type: application/json", "-d", payload_json],
-            capture_output=True, text=True
-        )
-        if result.returncode == 0:
-            response_data = json.loads(result.stdout)
-            if not response_data["choices"][0]["message"].get("function_call"):
-                return response_data["choices"][0]["message"]["content"]
-            else:
-                return response_data["choices"][0]["message"]["function_call"]
+        
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+        
+        response_data = response.json()
+
+        if not response_data["choices"][0]["message"].get("function_call"):
+            return response_data["choices"][0]["message"]["content"]
         else:
-            raise Exception(f"Error in curl request: {result.stderr}")
-    except Exception as e:
+            return response_data["choices"][0]["message"]["function_call"]
+
+    except requests.exceptions.RequestException as e:
         console.log(f"[red]Error querying AI Proxy: {e}[/]")
         return "Error: Unable to generate narrative."
 
 
-def create_story(analysis, visualizations_summary, data, has_time_series, statistical_tests):
+def create_story(analysis, visualizations, data, has_time_series, statistical_tests):
     """Creates a narrative using LLM based on analysis and visualizations."""
     functions = [
         {
@@ -364,7 +401,6 @@ def create_story(analysis, visualizations_summary, data, has_time_series, statis
          }
 
       ]
-
     # Convert int64 to int and float to float and Timestamp to string for JSON serialization
     columns = [{"name": col, "type": str(data[col].dtype), "missing_values": int(data.isnull().sum()[col])} for col in data.columns]
 
@@ -378,6 +414,12 @@ def create_story(analysis, visualizations_summary, data, has_time_series, statis
         new_row = {k: str(v) if isinstance(v, pd.Timestamp) else v for k, v in row.items()}
         example_rows.append(new_row)
 
+    statistical_tests = {
+            k: {k2: float(v2) if isinstance(v2, (int, float)) else v2 for k2, v2 in v.items()}
+            if isinstance(v, dict)
+            else v
+           for k, v in statistical_tests.items()
+        }
     
     context_str = json.dumps({
         "columns": columns,
@@ -386,12 +428,12 @@ def create_story(analysis, visualizations_summary, data, has_time_series, statis
         "summary_statistics": summary_statistics,
         "statistical_tests": statistical_tests,
     }, indent=2)
-
+    
     prompt = (
         f"You are an expert data scientist.\n"
         f"Analyze the following dataset context:\n"
         f"{context_str}\n"
-         f"Statistical tests are {'available' if statistical_tests else 'not available'} \n"
+        f"Statistical tests are {'available' if statistical_tests else 'not available'} \n"
         f"Here is what I know about the dataset:\n"
         f"- Time series analysis is {'applicable' if has_time_series else 'not applicable'}\n"
         f"- Visualizations generated: Correlation heatmap, boxplot, histograms, PCA scatterplot.\n"
@@ -399,6 +441,7 @@ def create_story(analysis, visualizations_summary, data, has_time_series, statis
         f"- A summary of the most significant findings and patterns.\n"
         f"- Recommendations for further analysis, based on the data and the statistical tests.\n"
         f"- If possible, mention any correlations and interesting facts.\n"
+        f"**Ensure the narrative integrates the results of the generated visualizations, referencing them by name.**\n"
         f"You may use any of the following functions to help you perform a more detailed analysis if required."
     )
 
