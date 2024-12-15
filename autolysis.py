@@ -37,6 +37,7 @@ import chardet
 from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
 from tabulate import tabulate
 import logging
+from scipy.stats import ttest_ind, pearsonr
 
 # Initialize console for rich logging
 console = Console()
@@ -188,6 +189,48 @@ def perform_pca(data):
     plt.title("PCA Scatterplot")
     return "pca_scatterplot.png"
 
+
+def perform_statistical_tests(data):
+    """Performs statistical tests on numeric data."""
+    numeric_data = data.select_dtypes(include='number')
+    if numeric_data.shape[1] < 2:
+        console.log("[yellow]Insufficient numeric features for statistical tests.")
+        return {}
+    
+    console.log("[cyan]Performing statistical tests...")
+    results = {}
+
+    # Independent t-tests
+    for col1_idx in range(numeric_data.shape[1]):
+      for col2_idx in range(col1_idx + 1, numeric_data.shape[1]):
+          col1 = numeric_data.columns[col1_idx]
+          col2 = numeric_data.columns[col2_idx]
+          try:
+            t_stat, p_value = ttest_ind(numeric_data[col1].dropna(), numeric_data[col2].dropna(), equal_var=False)
+            results[(f"t-test({col1},{col2})")] = {
+                "t_statistic": float(t_stat),
+                "p_value": float(p_value)
+            }
+          except Exception as e:
+            results[(f"t-test({col1},{col2})")] = f"Error: {e}"
+
+    # Pearson Correlation
+    for col1_idx in range(numeric_data.shape[1]):
+        for col2_idx in range(col1_idx + 1, numeric_data.shape[1]):
+          col1 = numeric_data.columns[col1_idx]
+          col2 = numeric_data.columns[col2_idx]
+          try:
+            correlation, p_value = pearsonr(numeric_data[col1].dropna(), numeric_data[col2].dropna())
+            results[f"pearson({col1},{col2})"] = {
+              "correlation": float(correlation),
+              "p_value": float(p_value)
+            }
+          except Exception as e:
+            results[f"pearson({col1},{col2})"] = f"Error: {e}"
+
+
+    return results
+
 def visualize_data(data, output_dir):
     """Generate advanced visualizations."""
     numeric_data = data.select_dtypes(include='number')
@@ -260,7 +303,7 @@ def query_llm(prompt, functions=None):
         return "Error: Unable to generate narrative."
 
 
-def create_story(analysis, visualizations_summary, data, has_time_series):
+def create_story(analysis, visualizations_summary, data, has_time_series, statistical_tests):
     """Creates a narrative using LLM based on analysis and visualizations."""
     functions = [
         {
@@ -304,7 +347,22 @@ def create_story(analysis, visualizations_summary, data, has_time_series):
                        },
                        "required": ["outlier_count"],
               }
+         },
+         {
+             "name": "summarize_statistical_tests",
+             "description": "Summarize the results of statistical tests.",
+             "parameters": {
+                  "type": "object",
+                    "properties": {
+                    "tests_count": {
+                        "type": "integer",
+                         "description": "The number of statistical tests performed"
+                        }
+                    },
+                     "required": ["tests_count"]
+                }
          }
+
       ]
 
     # Convert int64 to int and float to float and Timestamp to string for JSON serialization
@@ -326,19 +384,22 @@ def create_story(analysis, visualizations_summary, data, has_time_series):
         "example_rows": example_rows,
         "shape": data.shape,
         "summary_statistics": summary_statistics,
+        "statistical_tests": statistical_tests,
     }, indent=2)
 
     prompt = (
         f"You are an expert data scientist.\n"
         f"Analyze the following dataset context:\n"
         f"{context_str}\n"
+         f"Statistical tests are {'available' if statistical_tests else 'not available'} \n"
         f"Here is what I know about the dataset:\n"
         f"- Time series analysis is {'applicable' if has_time_series else 'not applicable'}\n"
         f"- Visualizations generated: Correlation heatmap, boxplot, histograms, PCA scatterplot.\n"
         f"Provide:\n"
         f"- A summary of the most significant findings and patterns.\n"
-        f"- Recommendations for further analysis.\n"
-         f"You may use any of the following functions to help you perform a more detailed analysis if required."
+        f"- Recommendations for further analysis, based on the data and the statistical tests.\n"
+        f"- If possible, mention any correlations and interesting facts.\n"
+        f"You may use any of the following functions to help you perform a more detailed analysis if required."
     )
 
     response = query_llm(prompt, functions=functions)
@@ -368,6 +429,14 @@ def create_story(analysis, visualizations_summary, data, has_time_series):
              The number of outliers is {function_args['outlier_count']}.
              """
             analysis_summary += query_llm(prompt_outliers)
+          elif function_name == "summarize_statistical_tests":
+            analysis_summary += f"Here is a summary of the performed statistical tests, I found {function_args['tests_count']} tests."
+            prompt_statistical_tests = f"""
+              Provide a summary of the statistical tests performed on the dataset:
+               {context_str}
+              The number of tests is {function_args['tests_count']}.
+            """
+            analysis_summary += query_llm(prompt_statistical_tests)
           else:
             analysis_summary += "I couldn't understand your request, I'll proceed generating a summary without additional analysis."
     return analysis_summary
@@ -415,7 +484,9 @@ def main():
     pca_path = perform_pca(df)
     visualizations = visualize_data(df, output_dir)
     visualizations.append(os.path.join(output_dir, pca_path))
-
+    
+    statistical_tests = perform_statistical_tests(df)
+    
     has_time_series = is_date_column(df)
 
     analysis = {
@@ -425,7 +496,7 @@ def main():
         "summary_statistics": df.describe(include="all").to_dict(),
     }
 
-    story = create_story(analysis, visualizations, df, has_time_series)
+    story = create_story(analysis, visualizations, df, has_time_series, statistical_tests)
     save_results(output_dir, analysis, visualizations, story)
 
     console.log("[green]Analysis completed successfully.")
