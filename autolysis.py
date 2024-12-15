@@ -188,9 +188,6 @@ def perform_pca(data):
     plt.figure(figsize=(8, 6))
     sns.scatterplot(x='PCA1', y='PCA2', hue='Cluster', data=data, palette='tab10')
     plt.title("PCA Scatterplot")
-    plt.xlabel("PCA1")
-    plt.ylabel("PCA2")
-    plt.legend(title="Clusters")
     return "pca_scatterplot.png"
 
 
@@ -278,7 +275,7 @@ def visualize_data(data, output_dir):
     if not numeric_data.empty:
         console.log("[cyan]Generating correlation heatmap...")
         plt.figure(figsize=(10, 8))
-        sns.heatmap(numeric_data.corr(), annot=True, cmap="coolwarm", annot_kws={"fontsize":8}, cbar=True)
+        sns.heatmap(numeric_data.corr(), annot=True, cmap="coolwarm", annot_kws={"fontsize":8})
         plt.title("Correlation Heatmap")
         plt.xticks(rotation=45, ha='right')
         plt.yticks(rotation=0)
@@ -304,21 +301,9 @@ def visualize_data(data, output_dir):
         plt.savefig(histograms_path)
         plt.close()
         visualizations.append(histograms_path)
-    
-    if data['Cluster'].nunique() > 1 and 'PCA1' in data.columns and 'PCA2' in data.columns:
-        console.log("[cyan]Generating PCA scatterplot...")
-        plt.figure(figsize=(8, 6))
-        sns.scatterplot(x='PCA1', y='PCA2', hue='Cluster', data=data, palette='tab10')
-        plt.title("PCA Scatterplot")
-        plt.xlabel("PCA1")
-        plt.ylabel("PCA2")
-        plt.legend(title="Clusters")
-        pca_path = os.path.join(output_dir, "pca_scatterplot.png")
-        plt.savefig(pca_path)
-        plt.close()
-        visualizations.append(pca_path)
+
     else:
-      console.log("[yellow] Insufficient data for PCA scatterplot")
+        console.log("[yellow]No numeric data available for visualizations.")
 
     return visualizations
 
@@ -400,7 +385,7 @@ def create_story(analysis, visualizations, data, has_time_series, statistical_te
                        "required": ["outlier_count"],
               }
          },
-        {
+         {
              "name": "summarize_statistical_tests",
              "description": "Summarize the results of statistical tests.",
              "parameters": {
@@ -428,7 +413,7 @@ def create_story(analysis, visualizations, data, has_time_series, statistical_te
     for row in data.head(3).to_dict(orient="records"):
         new_row = {k: str(v) if isinstance(v, pd.Timestamp) else v for k, v in row.items()}
         example_rows.append(new_row)
-    
+
     statistical_tests = {
             k: {k2: float(v2) if isinstance(v2, (int, float)) else v2 for k2, v2 in v.items()}
             if isinstance(v, dict)
@@ -453,9 +438,10 @@ def create_story(analysis, visualizations, data, has_time_series, statistical_te
         f"- Time series analysis is {'applicable' if has_time_series else 'not applicable'}\n"
         f"- Visualizations generated: Correlation heatmap, boxplot, histograms, PCA scatterplot.\n"
         f"Provide:\n"
-        f"- A summary of the most significant findings and patterns, **explicitly referencing the generated visualizations by name and describing the main findings in them**.\n"
-        f"- Recommendations for further analysis, based on the data and the statistical tests, **if there are any relevant statistical tests results, mention them by name and describe their implications**.\n"
+        f"- A summary of the most significant findings and patterns.\n"
+        f"- Recommendations for further analysis, based on the data and the statistical tests.\n"
         f"- If possible, mention any correlations and interesting facts.\n"
+        f"**Ensure the narrative integrates the results of the generated visualizations, referencing them by name.**\n"
         f"You may use any of the following functions to help you perform a more detailed analysis if required."
     )
 
@@ -470,30 +456,32 @@ def create_story(analysis, visualizations, data, has_time_series, statistical_te
           if function_name == "perform_time_series_analysis":
             analysis_summary += "Performing a time series analysis..."
             analysis_summary += f"You asked me to analize the '{function_args['date_column']}' column but the requested functionality was not implemented in this version."
-          if function_name == "generate_cluster_summary":
-             analysis_summary += f"Here is a summary of the generated clusters, based on the analysis we identified {function_args.get('cluster_count',0)} clusters."
+          elif function_name == "generate_cluster_summary":
+             analysis_summary += f"Here is a summary of the generated clusters, based on the analysis we identified {function_args['cluster_count']} clusters."
              prompt_cluster = f"""
              Provide a summary of the clusters identified in the data:
              {context_str}
-             The number of clusters is {function_args.get('cluster_count',0)}.
+             The number of clusters is {function_args['cluster_count']}.
              """
              analysis_summary += query_llm(prompt_cluster)
-          if function_name == "generate_outlier_summary":
-            analysis_summary += f"Here is a summary of the detected outliers, I found {function_args.get('outlier_count',0)} outliers."
+          elif function_name == "generate_outlier_summary":
+            analysis_summary += f"Here is a summary of the detected outliers, I found {function_args['outlier_count']} outliers."
             prompt_outliers = f"""
              Provide a summary of the outliers identified in the data:
              {context_str}
-             The number of outliers is {function_args.get('outlier_count',0)}.
+             The number of outliers is {function_args['outlier_count']}.
              """
             analysis_summary += query_llm(prompt_outliers)
-          if function_name == "summarize_statistical_tests":
-            analysis_summary += f"Here is a summary of the performed statistical tests, I found {function_args.get('tests_count',0)} tests."
+          elif function_name == "summarize_statistical_tests":
+            analysis_summary += f"Here is a summary of the performed statistical tests, I found {function_args['tests_count']} tests."
             prompt_statistical_tests = f"""
               Provide a summary of the statistical tests performed on the dataset:
                {context_str}
-              The number of tests is {function_args.get('tests_count',0)}.
+              The number of tests is {function_args['tests_count']}.
             """
             analysis_summary += query_llm(prompt_statistical_tests)
+          else:
+            analysis_summary += "I couldn't understand your request, I'll proceed generating a summary without additional analysis."
     return analysis_summary
 
 
@@ -512,7 +500,6 @@ def save_results(output_dir, analysis, visualizations, story):
         for viz in visualizations:
             f.write(f"- ![Visualization]({os.path.basename(viz)})\n")
 
-
 def create_output_folder(file_path):
     """Create a structured output folder named after the input file."""
     output_dir = os.path.splitext(os.path.basename(file_path))[0]
@@ -521,7 +508,6 @@ def create_output_folder(file_path):
     return output_dir
 
 def main():
-    """Main analysis function."""
     console.log("[cyan]Starting script...")
     if len(sys.argv) != 2:
         console.log("[red]Usage: python autolysis.py dataset.csv")
@@ -539,19 +525,20 @@ def main():
     df = detect_outliers(df)
     df = perform_clustering(df)
     pca_path = perform_pca(df)
+    visualizations = visualize_data(df, output_dir)
+    visualizations.append(os.path.join(output_dir, pca_path))
     
     statistical_tests = perform_statistical_tests(df)
     
-    visualizations = visualize_data(df, output_dir)
-    
     has_time_series = is_date_column(df)
-    
+
     analysis = {
         "shape": df.shape,
         "columns": df.dtypes.to_dict(),
         "missing_values": df.isnull().sum().to_dict(),
         "summary_statistics": df.describe(include="all").to_dict(),
     }
+
     story = create_story(analysis, visualizations, df, has_time_series, statistical_tests)
     save_results(output_dir, analysis, visualizations, story)
 
