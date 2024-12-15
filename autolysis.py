@@ -1,586 +1,570 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#   "numpy",
+#   "httpx",
 #   "pandas",
+#   "numpy",
 #   "matplotlib",
 #   "seaborn",
-#   "scipy",
+#   "chardet",
 #   "scikit-learn",
-#   "requests",
-#   "chardet"
+#   "rich",
+#   "tenacity",
+#   "openai",
+#   "tabulate",
+#   "requests"
 # ]
 # ///
+
 import os
 import sys
-import csv
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+import re
 import json
-import requests
-import chardet
-from scipy import stats
-from sklearn.cluster import KMeans, DBSCAN
-from sklearn.preprocessing import StandardScaler, RobustScaler
-from sklearn.decomposition import PCA, TruncatedSVD
-from sklearn.impute import SimpleImputer
-from sklearn.feature_selection import mutual_info_classif
+import base64
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import silhouette_score
-from typing import Dict, Any, List
+from sklearn.cluster import KMeans
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from rich.console import Console
+from dateutil import parser
+import chardet
+from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
+from tabulate import tabulate
+import logging
+from scipy.stats import ttest_ind, pearsonr, shapiro, levene
+import requests
 
+# Initialize console for rich logging
+console = Console()
 
-def json_serialize_handler(obj):
+# Configure logging for tenacity
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-        #JSON serialization handler for various non-standard types
+# Environment variable for AI Proxy token
+AIPROXY_TOKEN = os.environ.get("AIPROXY_TOKEN")
+if not AIPROXY_TOKEN:
+    raise EnvironmentError("AIPROXY_TOKEN is not set. Please set it before running the script.")
 
-        if isinstance(obj, (np.integer, np.floating, np.bool_)):
-            return obj.item()  # Convert NumPy scalar to Python scalar
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, pd.Series):
-            return obj.tolist()
-        elif hasattr(obj, 'dtype'):
-            return str(obj.dtype)
-        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+# Retry settings
+def retry_settings_with_logging():
+    return retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        before_sleep=before_sleep_log(logger, logging.INFO)
+    )
 
-class AdvancedDataAnalyzer:
-    def __init__(self, filename):
+@retry_settings_with_logging()
+def detect_encoding(file_path):
+    """Detect the encoding of a CSV file."""
+    with open(file_path, 'rb') as file:
+        result = chardet.detect(file.read())
+        return result['encoding']
 
-        # Initialize the data analyzer with robust error handling and dynamic configuration
+@retry_settings_with_logging()
+def read_csv(file_path):
+    """Read a CSV file with automatic encoding detection and flexible date parsing using regex."""
+    try:
+        console.log("Detecting file encoding...")
+        encoding = detect_encoding(file_path)
+        console.log(f"Detected encoding: {encoding}")
 
-        self.filename = filename
-        self.df = self._load_csv()
-        self.config = {
-            'visualization_dpi': 512/8,
-            'max_scatter_plots': 12,
-            'clustering_methods': ['kmeans', 'dbscan'],
-            'outlier_detection_methods': ['iqr', 'isolation_forest']
-        }
+        df = pd.read_csv(file_path, encoding=encoding, encoding_errors='replace')
 
+        # Attempt to parse date columns using regex
+        for column in df.columns:
+            if df[column].dtype == object and is_date_column(df[column]):
+                console.log(f"Parsing dates in column: {column}")
+                df[column] = df[column].apply(parse_date_with_regex)
 
-    def _load_csv(self):
+        return df
 
-        # Enhanced CSV loading with comprehensive encoding detection and validation
+    except Exception as e:
+        console.log(f"[red]Error reading the file: {e}[/]")
+        sys.exit(1)
 
-        encodings_to_try = [
-            'utf-8', 'iso-8859-1', 'latin1', 'cp1252', 'utf-16',
-            'ascii', 'big5', 'shift_jis', 'gb2312'
-        ]
+def parse_date_with_regex(date_str):
+    """Parse a date string using regex patterns to identify different date formats."""
+    if not isinstance(date_str, str):  # Skip non-string values (e.g., NaN, float)
+        return date_str  # Return the value as-is
 
-        for encoding in encodings_to_try:
+    if not re.search(r'\d', date_str):
+        return np.nan  # If no digits are found, it's not likely a date
+
+    patterns = [
+        (r"\d{2}-[A-Za-z]{3}-\d{4}", "%d-%b-%Y"),
+        (r"\d{2}-[A-Za-z]{3}-\d{2}", "%d-%b-%y"),
+        (r"\d{4}-\d{2}-\d{2}", "%Y-%m-%d"),
+        (r"\d{2}/\d{2}/\d{4}", "%m/%d/%Y"),
+        (r"\d{2}/\d{2}/\d{4}", "%d/%m/%Y"),
+    ]
+
+    for pattern, date_format in patterns:
+        if re.match(pattern, date_str):
             try:
-                df = pd.read_csv(self.filename, encoding=encoding,
-                                 low_memory=False,
-                                 parse_dates=True,
-                                 infer_datetime_format=True)
-
-                # Additional data validation
-                if df.empty:
-                    print(f"Warning: Empty dataframe loaded with {encoding} encoding")
-                    continue
-
-                print(f"Successfully loaded file using {encoding} encoding")
-                return df
+                return pd.to_datetime(date_str, format=date_format, errors='coerce')
             except Exception as e:
-                print(f"Failed to load with {encoding} encoding: {e}")
+                console.log(f"Error parsing date: {date_str} with format {date_format}. Error: {e}")
+                return np.nan
 
-        raise ValueError("Could not load CSV file with any attempted encoding")
+    try:
+        return parser.parse(date_str, fuzzy=True, dayfirst=False)
+    except Exception as e:
+        console.log(f"Error parsing date with dateutil: {date_str}. Error: {e}")
+        return np.nan
 
-    def advanced_data_profiling(self):
+def is_date_column(column):
+    """Determines whether a column likely contains dates based on column name or content."""
+    if isinstance(column, str):
+        if any(keyword in column.lower() for keyword in ['date', 'time', 'timestamp']):
+            return True
 
-        # Comprehensive data profiling with advanced statistical insights
+    sample_values = column.dropna().head(10)
+    date_patterns = [r"\d{2}-[A-Za-z]{3}-\d{2}", r"\d{2}-[A-Za-z]{3}-\d{4}", r"\d{4}-\d{2}-\d{2}", r"\d{2}/\d{2}/\d{4}"]
 
-        # Data type inference and advanced type detection
-        data_types = {}
-        for col in self.df.columns:
-            unique_ratio = self.df[col].nunique() / len(self.df)
+    for value in sample_values:
+        if isinstance(value, str):
+            for pattern in date_patterns:
+                if re.match(pattern, value):
+                    return True
+    return False
 
-            if pd.api.types.is_datetime64_any_dtype(self.df[col]):
-                data_types[col] = 'datetime'
-            elif pd.api.types.is_numeric_dtype(self.df[col]):
-                if unique_ratio < 0.05:
-                    data_types[col] = 'categorical_numeric'
-                else:
-                    data_types[col] = 'continuous'
-            elif pd.api.types.is_categorical_dtype(self.df[col]):
-                data_types[col] = 'categorical'
-            else:
-                data_types[col] = 'text'
+def clean_data(data):
+    """Handle missing or invalid data."""
+    console.log("[cyan]Cleaning data...")
+    data = data.drop_duplicates()
+    data = data.dropna(how='all')
+    data.fillna(data.median(numeric_only=True), inplace=True)
+    return data
 
-        # Advanced statistical tests
-        normality_tests = {}
-        for col, dtype in data_types.items():
-            if dtype == 'continuous':
-                try:
-                    _, p_value = stats.normaltest(self.df[col].dropna())
-                    normality_tests[col] = {
-                        'is_normal': p_value > 0.05,
-                        'p_value': p_value
-                    }
-                except Exception:
-                    pass
+def detect_outliers(data):
+    """Detect outliers using Isolation Forest."""
+    numeric_data = data.select_dtypes(include='number')
+    if numeric_data.empty:
+        console.log("[yellow]No numeric data found for outlier detection.")
+        return data
 
-        # Mutual information for feature importance
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns
-        feature_importance = {}
-        for col in numeric_cols:
-            try:
-                importance = mutual_info_classif(
-                    self.df[[col]],
-                    pd.qcut(self.df[col], q=4, labels=False)
-                )[0]
-                feature_importance[col] = importance
-            except Exception:
-                pass
+    console.log("[cyan]Performing outlier detection...")
+    model = IsolationForest(contamination=0.05, random_state=42)
+    outliers = model.fit_predict(numeric_data)
+    data['Outlier'] = (outliers == -1)
+    return data
 
-        return {
-            'data_types': data_types,
-            'normality_tests': normality_tests,
-            'feature_importance': feature_importance
-        }
+def perform_clustering(data):
+    """Perform KMeans clustering on numeric data."""
+    numeric_data = data.select_dtypes(include='number')
+    if numeric_data.shape[1] < 2:
+        console.log("[yellow]Insufficient numeric features for clustering.")
+        return data
 
-    def advanced_outlier_detection(self):
+    console.log("[cyan]Performing clustering...")
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(numeric_data)
+    kmeans = KMeans(n_clusters=3, random_state=42, n_init='auto')
+    data['Cluster'] = kmeans.fit_predict(scaled_data)
+    return data
 
-        # Multi-method outlier detection with visualization
+def perform_pca(data):
+    """Perform Principal Component Analysis (PCA) on numeric data."""
+    numeric_data = data.select_dtypes(include='number')
+    if numeric_data.shape[1] < 2:
+        console.log("[yellow]Insufficient numeric features for PCA.")
+        return data
 
-        # Dynamic Analyis
-        outlier_methods = {
-            'iqr': self._iqr_outliers,
-            'isolation_forest': self._isolation_forest_outliers
-        }
+    console.log("[cyan]Performing PCA...")
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(numeric_data)
+    pca = PCA(n_components=2)
+    components = pca.fit_transform(scaled_data)
+    data['PCA1'] = components[:, 0]
+    data['PCA2'] = components[:, 1]
 
-        all_outliers = {}
-        for method_name, method_func in outlier_methods.items():
-            outliers = method_func()
-            if outliers:
-                all_outliers[method_name] = outliers
+    plt.figure(figsize=(8, 6))
+    sns.scatterplot(x='PCA1', y='PCA2', hue='Cluster', data=data, palette='tab10')
+    plt.title("PCA Scatterplot")
+    plt.xlabel("PCA1")
+    plt.ylabel("PCA2")
+    plt.legend(title="Clusters")
+    return "pca_scatterplot.png"
 
-        # Enhanced visualization
-        plt.figure(figsize=(20, 10))
-        plt.suptitle('Outlier Detection Comparison', fontsize=16)
 
-        # Plotting the outliers
-        for i, (method, method_outliers) in enumerate(all_outliers.items(), 1):
-            plt.subplot(2, len(all_outliers), i)
-            for col, details in method_outliers.items():
-                sns.boxplot(data=self.df, y=col)
-                plt.title(f'{method.replace("_", " ").title()}: {col} Outliers', fontsize=10)
-                plt.xticks(rotation=45)
+def perform_statistical_tests(data):
+    """Performs statistical tests on numeric data."""
+    numeric_data = data.select_dtypes(include='number')
+    if numeric_data.shape[1] < 2:
+        console.log("[yellow]Insufficient numeric features for statistical tests.")
+        return {}
+    
+    console.log("[cyan]Performing statistical tests...")
+    results = {}
 
-        # Optimize the image configuration
-        plt.tight_layout()
-        plt.savefig('outliers_boxplot.png', dpi=self.config['visualization_dpi'])
-        plt.close()
+    # Independent t-tests
+    for col1_idx in range(numeric_data.shape[1]):
+      for col2_idx in range(col1_idx + 1, numeric_data.shape[1]):
+          col1 = numeric_data.columns[col1_idx]
+          col2 = numeric_data.columns[col2_idx]
+          
+          sample1 = numeric_data[col1].dropna()
+          sample2 = numeric_data[col2].dropna()
 
-        return all_outliers
+          if len(sample1) < 2 or len(sample2) < 2:
+                results[(f"t-test({col1},{col2})")] = "Skipped: Insufficient data"
+                continue
+          
+          try:
+              # Check for normality using Shapiro-Wilk
+              stat1, p_norm1 = shapiro(sample1)
+              stat2, p_norm2 = shapiro(sample2)
+              
+              alpha = 0.05
+              if p_norm1 < alpha or p_norm2 < alpha:
+                  results[(f"t-test({col1},{col2})")] = "Skipped: Normality assumption not met"
+                  continue
 
-    def _iqr_outliers(self):
-        numeric_columns = self.df.select_dtypes(include=[np.number]).columns
-        outliers = {}
+              # Check for equal variances using Levene
+              stat_var, p_var = levene(sample1, sample2)
 
-        # Quantile calculations
+              if p_var < alpha:
+                   t_stat, p_value = ttest_ind(sample1, sample2, equal_var=False)
+              else:
+                  t_stat, p_value = ttest_ind(sample1, sample2, equal_var=True)
 
-        for column in numeric_columns:
-            Q1 = self.df[column].quantile(0.25)
-            Q3 = self.df[column].quantile(0.75)
-            IQR = Q3 - Q1
-            lower_bound = Q1 - 1.5 * IQR
-            upper_bound = Q3 + 1.5 * IQR
+              results[(f"t-test({col1},{col2})")] = {
+                  "t_statistic": float(t_stat),
+                  "p_value": float(p_value),
+                  "normality_p_sample_1": float(p_norm1),
+                  "normality_p_sample_2": float(p_norm2),
+                  "variance_p_value": float(p_var),
+              }
+          except Exception as e:
+            results[(f"t-test({col1},{col2})")] = f"Error: {e}"
 
-            # Creating column outliers
-            column_outliers = self.df[(self.df[column] < lower_bound) | (self.df[column] > upper_bound)]
-            if len(column_outliers) > 0:
-                outliers[column] = {
-                    "total_outliers": len(column_outliers),
-                    "percentage": (len(column_outliers) / len(self.df)) * 100,
-                    "lower_bound": float(lower_bound),
-                    "upper_bound": float(upper_bound)
-                }
-
-        return outliers
-
-    def _isolation_forest_outliers(self):
-        # Dynamic Analyis
-        numeric_columns = self.df.select_dtypes(include=[np.number]).columns
-
-        if len(numeric_columns) == 0:
-            return {}
-
-        X = self.df[numeric_columns]
-        imputer = SimpleImputer(strategy='median')
-        scaler = RobustScaler()
-
-        X_imputed = imputer.fit_transform(X)
-        X_scaled = scaler.fit_transform(X_imputed)
-
-        clf = IsolationForest(contamination=0.1, random_state=42)
-        y_pred = clf.fit_predict(X_scaled)
-
-        outliers = {}
-        for col in numeric_columns:
-            column_outliers = self.df[y_pred == -1]
-            if len(column_outliers) > 0:
-                outliers[col] = {
-                    "total_outliers": len(column_outliers),
-                    "percentage": (len(column_outliers) / len(self.df)) * 100
-                }
-
-        return outliers
-
-    def advanced_clustering(self):
-
-        # Multi-method clustering with optimal cluster determination
-
-        numeric_columns = self.df.select_dtypes(include=[np.number]).columns
-
-        # Data preparation
-        X = self.df[numeric_columns]
-        imputer = SimpleImputer(strategy='median')
-        scaler = StandardScaler()
-
-        X_imputed = imputer.fit_transform(X)
-        X_scaled = scaler.fit_transform(X_imputed)
-
-        # Dimensionality reduction
-        pca = PCA(n_components=min(2, len(numeric_columns)))
-        X_pca = pca.fit_transform(X_scaled)
-
-        # Clustering methods
-        clustering_results = {}
-
-        # K-means with silhouette score for optimal clusters
-        max_clusters = min(10, len(X) // 2)
-        silhouette_scores = []
-
-        for n_clusters in range(2, max_clusters + 1):
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            cluster_labels = kmeans.fit_predict(X_scaled)
-            score = silhouette_score(X_scaled, cluster_labels)
-            silhouette_scores.append((n_clusters, score))
-
-        optimal_clusters = max(silhouette_scores, key=lambda x: x[1])[0]
-
-        kmeans = KMeans(n_clusters=optimal_clusters, random_state=42, n_init=10)
-        clustering_results['kmeans'] = {
-            'labels': kmeans.fit_predict(X_scaled),
-            'optimal_clusters': optimal_clusters
-        }
-
-        # DBSCAN clustering
-        try:
-            dbscan = DBSCAN(eps=0.5, min_samples=5)
-            clustering_results['dbscan'] = {
-                'labels': dbscan.fit_predict(X_scaled)
+    # Pearson Correlation
+    for col1_idx in range(numeric_data.shape[1]):
+        for col2_idx in range(col1_idx + 1, numeric_data.shape[1]):
+          col1 = numeric_data.columns[col1_idx]
+          col2 = numeric_data.columns[col2_idx]
+          
+          sample1 = numeric_data[col1].dropna()
+          sample2 = numeric_data[col2].dropna()
+          
+          if len(sample1) < 2 or len(sample2) < 2:
+            results[f"pearson({col1},{col2})"] = "Skipped: Insufficient data"
+            continue
+          
+          try:
+            correlation, p_value = pearsonr(sample1, sample2)
+            results[f"pearson({col1},{col2})"] = {
+              "correlation": float(correlation),
+              "p_value": float(p_value)
             }
-        except Exception as e:
-            print(f"DBSCAN clustering failed: {e}")
+          except Exception as e:
+            results[f"pearson({col1},{col2})"] = f"Error: {e}"
 
-        # Visualization
-        plt.figure(figsize=(15, 6))
-        for i, (method, result) in enumerate(clustering_results.items(), 1):
-            plt.subplot(1, len(clustering_results), i)
-            scatter = plt.scatter(X_pca[:, 0], X_pca[:, 1],
-                                  c=result['labels'],
-                                  cmap='viridis',
-                                  alpha=0.7)
-            plt.title(f'{method.capitalize()} Clustering')
-            plt.xlabel('First Principal Component')
-            plt.ylabel('Second Principal Component')
-            plt.colorbar(scatter, label='Cluster')
+    return results
 
-        # Optimize the image configuration
-        plt.tight_layout()
-        plt.savefig('cluster_analysis.png', dpi=self.config['visualization_dpi'])
+def visualize_data(data, output_dir):
+    """Generate advanced visualizations."""
+    numeric_data = data.select_dtypes(include='number')
+
+    visualizations = []
+
+    if not numeric_data.empty:
+        console.log("[cyan]Generating correlation heatmap...")
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(numeric_data.corr(), annot=True, cmap="coolwarm", annot_kws={"fontsize":8}, cbar=True)
+        plt.title("Correlation Heatmap")
+        plt.xticks(rotation=45, ha='right')
+        plt.yticks(rotation=0)
+        heatmap_path = os.path.join(output_dir, "correlation_heatmap.png")
+        plt.savefig(heatmap_path)
         plt.close()
+        visualizations.append(heatmap_path)
 
-        return clustering_results
+        console.log("[cyan]Generating boxplot...")
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(data=numeric_data)
+        plt.title("Boxplot of Numeric Data")
+        plt.xticks(rotation=45, ha='right')
+        plt.yticks(rotation=0)
+        boxplot_path = os.path.join(output_dir, "boxplot.png")
+        plt.savefig(boxplot_path)
+        plt.close()
+        visualizations.append(boxplot_path)
 
+        console.log("[cyan]Generating histograms...")
+        histograms_path = os.path.join(output_dir, "histograms.png")
+        numeric_data.hist(figsize=(12, 10), bins=20, color='teal')
+        plt.savefig(histograms_path)
+        plt.close()
+        visualizations.append(histograms_path)
+    
+    if data['Cluster'].nunique() > 1 and 'PCA1' in data.columns and 'PCA2' in data.columns:
+        console.log("[cyan]Generating PCA scatterplot...")
+        plt.figure(figsize=(8, 6))
+        sns.scatterplot(x='PCA1', y='PCA2', hue='Cluster', data=data, palette='tab10')
+        plt.title("PCA Scatterplot")
+        plt.xlabel("PCA1")
+        plt.ylabel("PCA2")
+        plt.legend(title="Clusters")
+        pca_path = os.path.join(output_dir, "pca_scatterplot.png")
+        plt.savefig(pca_path)
+        plt.close()
+        visualizations.append(pca_path)
+    else:
+      console.log("[yellow] Insufficient data for PCA scatterplot")
 
-    def generate_llm_summary(self) -> str:
+    else:
+        console.log("[yellow]No numeric data available for visualizations.")
 
-        # Advanced LLM-powered narrative generation with multi-stage, contextual analysis with reduced token usage
+    return visualizations
 
-        # Prepare comprehensive analysis context
-        analysis_context = self._prepare_analysis_context()
-
-        # Define a series of prompts for multi-faceted narrative generation
-
-        narrative_stages = [
-            self._generate_overview_prompt(analysis_context),
-            self._generate_insights_prompt(analysis_context),
-            self._generate_recommendations_prompt(analysis_context),
-            self.generate_graph_suggestion(analysis_context)
-        ]
-
-        # Concatenate narratives from different stages
-        full_narrative = self._compose_narrative(narrative_stages)
-
-        return full_narrative
-
-    def _prepare_analysis_context(self) -> Dict[str, Any]:
-
-        # Prepare a comprehensive context for narrative generation
-        # Reducing token usage
-        # Combine insights from various analyses and utilizing multiple llms prompts logically
-
-        profiling = self.advanced_data_profiling()
-        outliers = self.advanced_outlier_detection()
-        clustering = self.advanced_clustering()
-
-        return {
-            'dataset_overview': {
-                'total_rows': len(self.df),
-                'total_columns': len(self.df.columns),
-                'columns': list(self.df.columns)
-            },
-            'data_types': profiling['data_types'],
-            'normality_tests': profiling['normality_tests'],
-            'feature_importance': profiling['feature_importance'],
-            'outliers': outliers,
-            'clustering': {
-                'method': 'K-means',
-                'optimal_clusters': clustering['kmeans']['optimal_clusters'],
-                'labels': clustering['kmeans']['labels'].tolist()
-            },
-            'summary_statistics': self.df.describe().to_dict()
-        }
-
-    def _generate_overview_prompt(self, context: Dict[str, Any]) -> str:
-
-        # Generate an overview prompt focusing on dataset structure
-        # Dynamic prompting according to the data
-        # Providing optimum amount of data
-        overview_prompt = f"""
-        Provide a comprehensive overview of the dataset:
-
-        Dataset Structure:
-        - Total Rows: {context['dataset_overview']['total_rows']}
-        - Total Columns: {context['dataset_overview']['total_columns']}
-        - Columns: {', '.join(context['dataset_overview']['columns'])}
-
-        Data Type Breakdown:
-        {json.dumps(context['data_types'], indent=2)}
-
-        Describe the dataset's composition, highlighting unique characteristics,
-        potential data quality issues, and the significance of each column type.
-        """
-
-        return self._send_llm_request(overview_prompt)
-
-    def _generate_insights_prompt(self, context: Dict[str, Any]) -> str:
-
-        # Generate insights prompt focusing on statistical patterns
-        # Providing optimum amount of data
-        # Context rich prompt
-        insights_prompt = f"""
-        Analyze statistical insights and patterns in the dataset:
-
-        Feature Importance:
-        {json.dumps(context['feature_importance'], indent=2, default=json_serialize_handler)}
-
-        Normality Tests:
-        {json.dumps(context['normality_tests'], indent=2, default=json_serialize_handler)}
-
-        Outlier Analysis:
-        {json.dumps(context['outliers'], indent=2, default=json_serialize_handler)}
-
-        Clustering Insights:
-        - Optimal Clusters: {context['clustering']['optimal_clusters']}
-
-        Provide a deep dive into statistical relationships,
-        unexpected patterns, potential correlations,
-        and implications of the detected clusters and outliers.
-        """
-
-        return self._send_llm_request(insights_prompt)
-
-    def _generate_recommendations_prompt(self, context: Dict[str, Any]) -> str:
-
-        # Generate recommendations based on the analysis
-        # Multiple LLM Prompts with reduced token usage
-        recommendations_prompt = f"""
-        Based on the comprehensive dataset analysis,
-        provide strategic recommendations:
-
-        Dataset Characteristics:
-        - Total Rows: {context['dataset_overview']['total_rows']}
-        - Columns: {', '.join(context['dataset_overview']['columns'])}
-
-        Key Findings:
-        - Clustering: Identified {context['clustering']['optimal_clusters']} clusters
-        - Outliers Detected: {len(context['outliers'])} columns with outliers
-
-        Recommend:
-        1. Potential data preprocessing steps
-        2. Strategies for handling identified outliers
-        3. Insights for further investigation
-        4. Potential machine learning approaches
-        5. Business or research implications
-        """
-
-        return self._send_llm_request(recommendations_prompt)
-
-    def generate_graph_suggestion(self, context: Dict[str, Any]) -> str:
-
-        # Generate a graph suggestion from the LLM, implement it, and save the image file.
-        # Agentic work flow
-        # Prepare the context for graph suggestion
-        context = {
-            'dataset_overview': {
-                'total_rows': len(self.df),
-                'total_columns': len(self.df.columns),
-                'columns': list(self.df.columns)
-            },
-            'summary_statistics': self.df.describe().to_dict()
-        }
-
-        # Prepare the prompt for LLM
-        prompt = f"""
-        Dataset Overview:
-        - Total Rows: {context['dataset_overview']['total_rows']}
-        - Total Columns: {context['dataset_overview']['total_columns']}
-        - Columns: {', '.join(context['dataset_overview']['columns'])}
-        - File Name: {filename}
-        Summary Statistics:
-        {json.dumps(context['summary_statistics'], indent=2, default=json_serialize_handler)}
-
-        Graphs already created: Cluster Analysis, Outlier Boxplot 
-
-        Given the following dataset characteristics, suggest an additional graph or visualization
-        to analyze the data effectively. Include Python code to implement the visualization
-        using libraries like matplotlib or seaborn.
-        Use Enhanced CSV loading with comprehensive encoding detection and validation
-        encodings_to_try = [
-            'utf-8', 'iso-8859-1', 'latin1', 'cp1252', 'utf-16',
-            'ascii', 'big5', 'shift_jis', 'gb2312'
-        ]
-        The Python code should generate the visualization with dip=512/8, save it as 'llm_suggested_graph.png' and end with plt.close()
-        Note: Give only the code with everything else commented inside the code itself.
-        Please satisfy the condition in NOTE. Thank You!
-        """
-            
-        # Send the prompt to the AI system
-        ai_response = self._send_llm_request(prompt)
-        # Parse the code generated by the LLM
-        code = ai_response[9:len(ai_response)-4]
-        try:
-            # Execute the code generated by the LLM
-            exec(code)
-            return code
-        except Exception as e:
-            print(f"Error executing AI-suggested graph code: {e}")
-            code = "LLM failed to give proper code for graph. So skip this part"
-            return code
-
-
-    def _compose_narrative(self, narrative_stages: List[str]) -> str:
-
-        # Compose a coherent narrative from different analysis stages
-        # Agentic work flow
-        final_prompt = f"""
-        Integrate the following analysis stages into a cohesive,
-        storytelling narrative that provides a comprehensive
-        understanding of the dataset:
-
-        1. Dataset Overview
-        {narrative_stages[0]}
-
-        2. Statistical Insights
-        {narrative_stages[1]}
-
-        3. Strategic Recommendations
-        {narrative_stages[2]}
-
-        4. Code for Suggested Graph by the LLM
-        {narrative_stages[3]}
-
-        Create a narrative that:
-        - Flows logically between sections
-        - Highlights key discoveries
-        - Provides actionable insights
-        - Describe the LLM generated code (only if exists), Does not include the code itself
-        - Maintains an engaging, professional tone
-        """
-
-        return self._send_llm_request(final_prompt)
-
-    def _send_llm_request(self, prompt: str) -> str:
-
-        # Send request to AI Proxy with robust error handling
-
-        AIPROXY_TOKEN = os.environ.get("AIPROXY_TOKEN")
-
-        if not AIPROXY_TOKEN:
-            raise ValueError("AIPROXY_TOKEN environment variable is not set")
-
-        BASE_URL = "http://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
-
+def query_llm(prompt, functions=None):
+    """Queries the LLM for insights and returns the response, with function call support."""
+    try:
+        url = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
         headers = {
+            "Authorization": f"Bearer {AIPROXY_TOKEN}",
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {AIPROXY_TOKEN}"
         }
-        # Optimum token usage
-        data = {
+        payload = {
             "model": "gpt-4o-mini",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1000,
-            "temperature": 0.7
+            "messages": [
+                {"role": "system", "content": "You are a helpful data analysis assistant."},
+                {"role": "user", "content": prompt},
+            ],
         }
+        if functions:
+            payload["functions"] = functions
+        
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+        
+        response_data = response.json()
 
-        try:
-            response = requests.post(BASE_URL, headers=headers, json=data)
-            response.raise_for_status()
+        if not response_data["choices"][0]["message"].get("function_call"):
+            return response_data["choices"][0]["message"]["content"]
+        else:
+            return response_data["choices"][0]["message"]["function_call"]
 
-            # Extract and return narrative content
-            narrative = response.json().get("choices")[0].get("message").get("content")
-            return narrative
+    except requests.exceptions.RequestException as e:
+        console.log(f"[red]Error querying AI Proxy: {e}[/]")
+        return "Error: Unable to generate narrative."
 
-        except requests.exceptions.RequestException as e:
-            return f"Error generating narrative: {e}"
 
-    # Update the main method to use the summary generation
-    def generate_comprehensive_report(self):
+def create_story(analysis, visualizations, data, has_time_series, statistical_tests):
+    """Creates a narrative using LLM based on analysis and visualizations."""
+    functions = [
+        {
+            "name": "perform_time_series_analysis",
+            "description": "Perform time series analysis if a date column is present and a time-based analysis is feasible.",
+             "parameters": {
+                  "type": "object",
+                    "properties": {
+                        "date_column": {
+                            "type": "string",
+                            "description": "Name of the date column in the dataset."
+                         }
+                        },
+                       "required": ["date_column"],
+              },
+        },
+        {
+          "name": "generate_cluster_summary",
+          "description": "Summarize the characteristics of identified clusters based on cluster labels",
+          "parameters": {
+             "type": "object",
+             "properties": {
+                "cluster_count": {
+                     "type": "integer",
+                     "description": "The number of clusters found during the analysis"
+                     },
+              },
+             "required": ["cluster_count"],
+              }
+        },
+        {
+          "name": "generate_outlier_summary",
+            "description": "Summarize the detected outliers. Highlight any unusual or interesting characteristics.",
+             "parameters": {
+                  "type": "object",
+                    "properties": {
+                         "outlier_count": {
+                           "type": "integer",
+                           "description": "The number of outliers detected"
+                         }
+                       },
+                       "required": ["outlier_count"],
+              }
+         },
+        {
+             "name": "summarize_statistical_tests",
+             "description": "Summarize the results of statistical tests.",
+             "parameters": {
+                  "type": "object",
+                    "properties": {
+                    "tests_count": {
+                        "type": "integer",
+                         "description": "The number of statistical tests performed"
+                        }
+                    },
+                     "required": ["tests_count"]
+                }
+         }
 
-        # Generate a comprehensive report with LLM-powered narrative
+      ]
+    # Convert int64 to int and float to float and Timestamp to string for JSON serialization
+    columns = [{"name": col, "type": str(data[col].dtype), "missing_values": int(data.isnull().sum()[col])} for col in data.columns]
 
-        # analysis methods
-        profiling = self.advanced_data_profiling()
-        outliers = self.advanced_outlier_detection()
-        clustering = self.advanced_clustering()
+    summary_statistics = {
+        k: {k2: float(v2) if isinstance(v2, (int,float)) else str(v2) if isinstance(v2, pd.Timestamp) else v2 for k2, v2 in v.items()}
+        for k, v in analysis["summary_statistics"].items()
+        }
+    
+    example_rows = []
+    for row in data.head(3).to_dict(orient="records"):
+        new_row = {k: str(v) if isinstance(v, pd.Timestamp) else v for k, v in row.items()}
+        example_rows.append(new_row)
+    
+    statistical_tests = {
+            k: {k2: float(v2) if isinstance(v2, (int, float)) else v2 for k2, v2 in v.items()}
+            if isinstance(v, dict)
+            else v
+           for k, v in statistical_tests.items()
+        }
+    
+    context_str = json.dumps({
+        "columns": columns,
+        "example_rows": example_rows,
+        "shape": data.shape,
+        "summary_statistics": summary_statistics,
+        "statistical_tests": statistical_tests,
+    }, indent=2)
+    
+    prompt = (
+        f"You are an expert data scientist.\n"
+        f"Analyze the following dataset context:\n"
+        f"{context_str}\n"
+        f"Statistical tests are {'available' if statistical_tests else 'not available'} \n"
+        f"Here is what I know about the dataset:\n"
+        f"- Time series analysis is {'applicable' if has_time_series else 'not applicable'}\n"
+        f"- Visualizations generated: Correlation heatmap, boxplot, histograms, PCA scatterplot.\n"
+        f"Provide:\n"
+        f"- A summary of the most significant findings and patterns, **explicitly referencing the generated visualizations by name and describing the main findings in them**.\n"
+        f"- Recommendations for further analysis, based on the data and the statistical tests, **if there are any relevant statistical tests results, mention them by name and describe their implications**.\n"
+        f"- If possible, mention any correlations and interesting facts.\n"
+        f"You may use any of the following functions to help you perform a more detailed analysis if required."
+    )
 
-        # Generate LLM narrative
-        llm_narrative = AdvancedDataAnalyzer.generate_llm_summary(self)
+    response = query_llm(prompt, functions=functions)
+    
+    analysis_summary = ""
+    if not isinstance(response, dict):
+         analysis_summary = response
+    else:
+          function_name = response["name"]
+          function_args = json.loads(response["arguments"])
+          if function_name == "perform_time_series_analysis":
+            analysis_summary += "Performing a time series analysis..."
+            analysis_summary += f"You asked me to analize the '{function_args['date_column']}' column but the requested functionality was not implemented in this version."
+          elif function_name == "generate_cluster_summary":
+              if 'cluster_count' in function_args: # This is the fix.
+                  analysis_summary += f"Here is a summary of the generated clusters, based on the analysis we identified {function_args['cluster_count']} clusters."
+                  prompt_cluster = f"""
+                   Provide a summary of the clusters identified in the data:
+                   {context_str}
+                  The number of clusters is {function_args['cluster_count']}.
+                  """
+                  analysis_summary += query_llm(prompt_cluster)
+              
+          elif function_name == "generate_outlier_summary":
+              if 'outlier_count' in function_args:  # This is the fix.
+                  analysis_summary += f"Here is a summary of the detected outliers, I found {function_args['outlier_count']} outliers."
+                  prompt_outliers = f"""
+                   Provide a summary of the outliers identified in the data:
+                   {context_str}
+                   The number of outliers is {function_args['outlier_count']}.
+                   """
+                  analysis_summary += query_llm(prompt_outliers)
+          elif function_name == "summarize_statistical_tests":
+              if 'tests_count' in function_args: # This is the fix
+                analysis_summary += f"Here is a summary of the performed statistical tests, I found {function_args['tests_count']} tests."
+                prompt_statistical_tests = f"""
+                Provide a summary of the statistical tests performed on the dataset:
+                  {context_str}
+                The number of tests is {function_args['tests_count']}.
+                """
+                analysis_summary += query_llm(prompt_statistical_tests)
+          else:
+            analysis_summary += "I couldn't understand your request, I'll proceed generating a summary without additional analysis."
+    return analysis_summary
 
-        # Create report
-        report = f"""# Data Analysis Report
 
-    {llm_narrative}
+def save_results(output_dir, analysis, visualizations, story):
+    """Save results to README.md and the output folder."""
+    readme_path = os.path.join(output_dir, "README.md")
+    with open(readme_path, "w") as f:
+        f.write("# Automated Data Analysis Report\n\n")
+        f.write("## Data Overview\n")
+        f.write(f"**Shape**: {analysis['shape']}\n\n")
+        f.write("## Summary Statistics\n")
+        f.write(tabulate(pd.DataFrame(analysis["summary_statistics"]).reset_index(), headers='keys', tablefmt='github'))
+        f.write("\n\n## Narrative\n")
+        f.write(story)
+        f.write("\n\n## Visualizations\n")
+        for viz in visualizations:
+            f.write(f"- ![Visualization]({os.path.basename(viz)})\n")
 
-    """
 
-        # Write to markdown
-        with open('README.md', 'w') as f:
-            f.write(report)
-        return report
+def create_output_folder(file_path):
+    """Create a structured output folder named after the input file."""
+    output_dir = os.path.splitext(os.path.basename(file_path))[0]
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    return output_dir
 
 def main():
-
+    """Main analysis function."""
+    console.log("[cyan]Starting script...")
     if len(sys.argv) != 2:
-        print("Usage: uv run autolysis.py <csv_filename>")
+        console.log("[red]Usage: python autolysis.py dataset.csv")
         sys.exit(1)
-    global filename
-    filename = sys.argv[1]
-    analyzer = AdvancedDataAnalyzer(filename)
-    analyzer.generate_comprehensive_report()
-    with open('README.md', 'a') as f:
-            f.write("\n\n## Visualizations\n")
-            f.write("![Outliers Boxplot](outliers_boxplot.png)\n")
-            f.write("![Cluster Analysis](cluster_analysis.png)\n")
-            f.write("![LLM Suggested Graph](llm_suggested_graph.png)\n")
-        
+
+    file_path = sys.argv[1]
+    console.log(f"[yellow]Reading file: {file_path}[/]")
+    df = read_csv(file_path)
+    console.log("[green]Dataframe loaded.[/]")
+
+    # Create output folder
+    output_dir = create_output_folder(file_path)
+
+    df = clean_data(df)
+    df = detect_outliers(df)
+    df = perform_clustering(df)
+    pca_path = perform_pca(df)
+    
+    statistical_tests = perform_statistical_tests(df)
+    
+    visualizations = visualize_data(df, output_dir)
+    
+    has_time_series = is_date_column(df)
+    
+    analysis = {
+        "shape": df.shape,
+        "columns": df.dtypes.to_dict(),
+        "missing_values": df.isnull().sum().to_dict(),
+        "summary_statistics": df.describe(include="all").to_dict(),
+    }
+    story = create_story(analysis, visualizations, df, has_time_series, statistical_tests)
+    save_results(output_dir, analysis, visualizations, story)
+
+    console.log("[green]Analysis completed successfully.")
 
 if __name__ == "__main__":
     main()
