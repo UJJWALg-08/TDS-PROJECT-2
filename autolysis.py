@@ -1,184 +1,268 @@
 # /// script
-# requires-python = ">=3.8, <3.11"
+# requires-python = ">=3.11"
 # dependencies = [
-#     "numpy",
-#     "pandas",
-#     "scikit-learn",
-#     "chardet",
-#     "requests",
-#     "seaborn",
-#     "matplotlib",
-#     "python-dotenv",
-#     "missingno"
+#   "httpx",
+#   "pandas",
+#   "numpy",
+#   "matplotlib",
+#   "seaborn",
+#   "chardet",
+#   "scikit-learn",
+#   "rich",
+#   "tenacity",
+#   "openai",
+#   "tabulate"
 # ]
 # ///
 
 import os
 import sys
+import re
+import json
+import base64
+import subprocess
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import seaborn as sns
-import openai
-import json
-from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+from sklearn.ensemble import IsolationForest
 from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from rich.console import Console
+from dateutil import parser
+import chardet
+from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
+from tabulate import tabulate
+import logging
 
-# Set OpenAI API Key from environment variable
-openai.api_key = os.environ.get("AIPROXY_TOKEN")
-if not openai.api_key:
-    print("Error: Please set the AIPROXY_TOKEN environment variable.")
-    sys.exit(1)
+# Initialize console for rich logging
+console = Console()
 
+# Configure logging for tenacity
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def query_llm(prompt, functions=None, model="gpt-4o-mini"):
+# Environment variable for AI Proxy token
+AIPROXY_TOKEN = os.environ.get("AIPROXY_TOKEN")
+if not AIPROXY_TOKEN:
+    raise EnvironmentError("AIPROXY_TOKEN is not set. Please set it before running the script.")
+
+# Retry settings
+def retry_settings_with_logging():
+    return retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        before_sleep=before_sleep_log(logger, logging.INFO)
+    )
+
+@retry_settings_with_logging()
+def detect_encoding(file_path):
+    """Detect the encoding of a CSV file."""
+    with open(file_path, 'rb') as file:
+        result = chardet.detect(file.read())
+        return result['encoding']
+
+@retry_settings_with_logging()
+def read_csv(file_path):
+    """Read a CSV file with automatic encoding detection and flexible date parsing using regex."""
     try:
-        messages = [
-            {"role": "system", "content": "You are an expert data scientist. Please follow my instructions."},
-            {"role": "user", "content": prompt}
-        ]
-        kwargs = {}
-        if functions:
-          kwargs["functions"] = functions
-        response = openai.ChatCompletion.create(
-            model=model,
-            messages=messages,
-             **kwargs,
-        )
-        if not response['choices'][0]['message'].get("function_call"):
-          return response['choices'][0]['message']['content']
-        else:
-          function_call = response['choices'][0]['message']['function_call']
-          return function_call
-    except Exception as e:
-        print(f"Error querying LLM: {e}")
-        return None
+        console.log("Detecting file encoding...")
+        encoding = detect_encoding(file_path)
+        console.log(f"Detected encoding: {encoding}")
 
-def load_data(file_path):
-    """Loads data from a CSV file."""
+        df = pd.read_csv(file_path, encoding=encoding, encoding_errors='replace')
+
+        # Attempt to parse date columns using regex
+        for column in df.columns:
+            if df[column].dtype == object and is_date_column(df[column]):
+                console.log(f"Parsing dates in column: {column}")
+                df[column] = df[column].apply(parse_date_with_regex)
+
+        return df
+
+    except Exception as e:
+        console.log(f"[red]Error reading the file: {e}[/]")
+        sys.exit(1)
+
+def parse_date_with_regex(date_str):
+    """Parse a date string using regex patterns to identify different date formats."""
+    if not isinstance(date_str, str):  # Skip non-string values (e.g., NaN, float)
+        return date_str  # Return the value as-is
+
+    if not re.search(r'\d', date_str):
+        return np.nan  # If no digits are found, it's not likely a date
+
+    patterns = [
+        (r"\d{2}-[A-Za-z]{3}-\d{4}", "%d-%b-%Y"),
+        (r"\d{2}-[A-Za-z]{3}-\d{2}", "%d-%b-%y"),
+        (r"\d{4}-\d{2}-\d{2}", "%Y-%m-%d"),
+        (r"\d{2}/\d{2}/\d{4}", "%m/%d/%Y"),
+        (r"\d{2}/\d{2}/\d{4}", "%d/%m/%Y"),
+    ]
+
+    for pattern, date_format in patterns:
+        if re.match(pattern, date_str):
+            try:
+                return pd.to_datetime(date_str, format=date_format, errors='coerce')
+            except Exception as e:
+                console.log(f"Error parsing date: {date_str} with format {date_format}. Error: {e}")
+                return np.nan
+
     try:
-        data = pd.read_csv(file_path)
-        print(f"Successfully loaded data from: {file_path}")
-        return data
-    except FileNotFoundError:
-        print(f"Error: File not found at {file_path}")
-        sys.exit(1)
-    except pd.errors.ParserError:
-        print(f"Error: Could not parse the CSV file {file_path}. Please ensure it is a valid CSV file")
-        sys.exit(1)
+        return parser.parse(date_str, fuzzy=True, dayfirst=False)
     except Exception as e:
-        print(f"Error loading CSV: {e}")
-        sys.exit(1)
+        console.log(f"Error parsing date with dateutil: {date_str}. Error: {e}")
+        return np.nan
 
-def generate_summary_stats(data):
-    """Generates summary statistics and missing values for a DataFrame."""
-    summary = data.describe(include='all').transpose()
-    missing_values = data.isnull().sum()
-    return summary, missing_values
+def is_date_column(column):
+    """Determines whether a column likely contains dates based on column name or content."""
+    if isinstance(column, str):
+        if any(keyword in column.lower() for keyword in ['date', 'time', 'timestamp']):
+            return True
 
-def analyze_correlations(data):
-    """Calculates the correlation matrix for numeric columns."""
-    numeric_data = data.select_dtypes(include=[np.number])
-    if numeric_data.empty:
-      return None
-    correlation_matrix = numeric_data.corr()
-    return correlation_matrix
+    sample_values = column.dropna().head(10)
+    date_patterns = [r"\d{2}-[A-Za-z]{3}-\d{2}", r"\d{2}-[A-Za-z]{3}-\d{4}", r"\d{4}-\d{2}-\d{2}", r"\d{2}/\d{2}/\d{4}"]
 
-def detect_outliers(data):
-    """Detects outliers using z-score."""
-    numeric_data = data.select_dtypes(include=[np.number])
-    if numeric_data.empty:
-      return None
-    outliers = numeric_data[(np.abs((numeric_data - numeric_data.mean()) / numeric_data.std()) > 3).any(axis=1)]
-    return outliers
-
-def detect_time_series_opportunity(data):
-    """Determines if time-series analysis is applicable by checking for a date column."""
-    date_columns = [col for col in data.columns if 'date' in col.lower()]
-    if date_columns:
-      return True
+    for value in sample_values:
+        if isinstance(value, str):
+            for pattern in date_patterns:
+                if re.match(pattern, value):
+                    return True
     return False
 
-def perform_clustering(data):
-    """Perform clustering analysis using K-means."""
-    numeric_data = data.select_dtypes(include=[np.number])
-    if numeric_data.empty:
-        return None, None
+def clean_data(data):
+    """Handle missing or invalid data."""
+    console.log("[cyan]Cleaning data...")
+    data = data.drop_duplicates()
+    data = data.dropna(how='all')
+    data.fillna(data.median(numeric_only=True), inplace=True)
+    return data
 
+def detect_outliers(data):
+    """Detect outliers using Isolation Forest."""
+    numeric_data = data.select_dtypes(include='number')
+    if numeric_data.empty:
+        console.log("[yellow]No numeric data found for outlier detection.")
+        return data
+
+    console.log("[cyan]Performing outlier detection...")
+    model = IsolationForest(contamination=0.05, random_state=42)
+    outliers = model.fit_predict(numeric_data)
+    data['Outlier'] = (outliers == -1)
+    return data
+
+def perform_clustering(data):
+    """Perform KMeans clustering on numeric data."""
+    numeric_data = data.select_dtypes(include='number')
+    if numeric_data.shape[1] < 2:
+        console.log("[yellow]Insufficient numeric features for clustering.")
+        return data
+
+    console.log("[cyan]Performing clustering...")
     scaler = StandardScaler()
     scaled_data = scaler.fit_transform(numeric_data)
+    kmeans = KMeans(n_clusters=3, random_state=42, n_init='auto')
+    data['Cluster'] = kmeans.fit_predict(scaled_data)
+    return data
 
-    # Determine optimal number of clusters using silhouette score
-    silhouette_scores = []
-    for n_clusters in range(2, min(11, scaled_data.shape[0])):
-      kmeans = KMeans(n_clusters=n_clusters, init='k-means++', max_iter=300, n_init=10, random_state=42)
-      cluster_labels = kmeans.fit_predict(scaled_data)
-      score = silhouette_score(scaled_data, cluster_labels)
-      silhouette_scores.append((n_clusters, score))
-    
-    if silhouette_scores:
-        best_n_clusters = max(silhouette_scores, key=lambda item: item[1])[0]
-        kmeans = KMeans(n_clusters=best_n_clusters, init='k-means++', max_iter=300, n_init=10, random_state=42)
-        cluster_labels = kmeans.fit_predict(scaled_data)
-        return kmeans, cluster_labels
-    
-    return None, None
+def perform_pca(data):
+    """Perform Principal Component Analysis (PCA) on numeric data."""
+    numeric_data = data.select_dtypes(include='number')
+    if numeric_data.shape[1] < 2:
+        console.log("[yellow]Insufficient numeric features for PCA.")
+        return data
 
-def create_context_for_llm(data, summary, missing_values):
-    """Generates a structured context for the LLM."""
-    context = {
-        "columns": [{"name": col, "type": str(data[col].dtype), "missing_values": missing_values[col]} for col in data.columns],
-        "example_rows": data.head(3).to_dict(orient="records"),
-        "shape": data.shape,
-        "summary_statistics": summary.to_dict(),
-    }
-    return json.dumps(context, indent=2)
+    console.log("[cyan]Performing PCA...")
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(numeric_data)
+    pca = PCA(n_components=2)
+    components = pca.fit_transform(scaled_data)
+    data['PCA1'] = components[:, 0]
+    data['PCA2'] = components[:, 1]
 
+    plt.figure(figsize=(8, 6))
+    sns.scatterplot(x='PCA1', y='PCA2', hue='Cluster', data=data, palette='tab10')
+    plt.title("PCA Scatterplot")
+    return "pca_scatterplot.png"
 
-def generate_and_save_plots(data, file_prefix, correlation_matrix=None, outliers=None, cluster_labels=None, kmeans_model=None):
-    """Generates and saves visualizations."""
-    sns.set(style="whitegrid")
+def visualize_data(data, output_dir):
+    """Generate advanced visualizations."""
+    numeric_data = data.select_dtypes(include='number')
 
-    # Correlation heatmap
-    if correlation_matrix is not None and not correlation_matrix.empty:
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(correlation_matrix, annot=True, fmt=".2f", cmap="coolwarm", cbar=True)
-        plt.title("Correlation Matrix")
-        plt.savefig(f"{file_prefix}_correlation_matrix.png")
-        plt.close()
+    visualizations = []
 
-    # Pairplot
-    numeric_data = data.select_dtypes(include=[np.number])
     if not numeric_data.empty:
-        sns.pairplot(numeric_data)
-        plt.savefig(f"{file_prefix}_pairplot.png")
+        console.log("[cyan]Generating correlation heatmap...")
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(numeric_data.corr(), annot=True, cmap="coolwarm")
+        plt.title("Correlation Heatmap")
+        heatmap_path = os.path.join(output_dir, "correlation_heatmap.png")
+        plt.savefig(heatmap_path)
         plt.close()
+        visualizations.append(heatmap_path)
 
-    # Outliers boxplot
-    if outliers is not None and not outliers.empty:
-        plt.figure(figsize=(8, 6))
-        sns.boxplot(data=data.select_dtypes(include=[np.number]), orient="h")
-        plt.title("Outlier Detection")
-        plt.savefig(f"{file_prefix}_outliers.png")
+        console.log("[cyan]Generating boxplot...")
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(data=numeric_data)
+        plt.title("Boxplot of Numeric Data")
+        boxplot_path = os.path.join(output_dir, "boxplot.png")
+        plt.savefig(boxplot_path)
         plt.close()
-    
-    # Cluster scatterplot
-    if cluster_labels is not None and kmeans_model is not None:
-        numeric_data = data.select_dtypes(include=[np.number])
-        if numeric_data.shape[1] >= 2:
-            scaled_data = StandardScaler().fit_transform(numeric_data)
-            plt.figure(figsize=(8,6))
-            sns.scatterplot(x=scaled_data[:, 0], y=scaled_data[:, 1], hue=cluster_labels, palette="viridis", legend="full")
-            plt.title(f"Cluster Analysis (K={kmeans_model.n_clusters})")
-            plt.savefig(f"{file_prefix}_clusters.png")
-            plt.close()
+        visualizations.append(boxplot_path)
+
+        console.log("[cyan]Generating histograms...")
+        histograms_path = os.path.join(output_dir, "histograms.png")
+        numeric_data.hist(figsize=(12, 10), bins=20, color='teal')
+        plt.savefig(histograms_path)
+        plt.close()
+        visualizations.append(histograms_path)
+
+    else:
+        console.log("[yellow]No numeric data available for visualizations.")
+
+    return visualizations
+
+def query_llm(prompt, functions=None):
+    """Queries the LLM for insights and returns the response, with function call support."""
+    try:
+        url = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {AIPROXY_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": "You are a helpful data analysis assistant."},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        if functions:
+            payload["functions"] = functions
+        payload_json = json.dumps(payload)
+        result = subprocess.run(
+            ["curl", "-X", "POST", url, "-H", f"Authorization: Bearer {AIPROXY_TOKEN}", "-H", "Content-Type: application/json", "-d", payload_json],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            response_data = json.loads(result.stdout)
+            if not response_data["choices"][0]["message"].get("function_call"):
+                return response_data["choices"][0]["message"]["content"]
+            else:
+                return response_data["choices"][0]["message"]["function_call"]
+        else:
+            raise Exception(f"Error in curl request: {result.stderr}")
+    except Exception as e:
+        console.log(f"[red]Error querying AI Proxy: {e}[/]")
+        return "Error: Unable to generate narrative."
 
 
-def analyze_with_llm(context_str, file_prefix, has_time_series=False, correlation_matrix=None, outliers=None, cluster_labels=None, kmeans_model=None):
-      """Analyzes the data using LLM, leveraging function calls for dynamic analysis."""
-      
-      functions = [
+def create_story(analysis, visualizations_summary, data, has_time_series):
+    """Creates a narrative using LLM based on analysis and visualizations."""
+    functions = [
         {
             "name": "perform_time_series_analysis",
             "description": "Perform time series analysis if a date column is present and a time-based analysis is feasible.",
@@ -222,32 +306,32 @@ def analyze_with_llm(context_str, file_prefix, has_time_series=False, correlatio
               }
          }
       ]
-      prompt = f"""
-        You are an expert data scientist.
-        Analyze this dataset context:
-        {context_str}
+    context_str = json.dumps({
+        "columns": [{"name": col, "type": str(data[col].dtype), "missing_values": data.isnull().sum()[col]} for col in data.columns],
+        "example_rows": data.head(3).to_dict(orient="records"),
+        "shape": data.shape,
+        "summary_statistics": analysis["summary_statistics"]
+    }, indent=2)
 
-        Here is what I know about the dataset:
+    prompt = (
+        f"You are an expert data scientist.\n"
+        f"Analyze the following dataset context:\n"
+        f"{context_str}\n"
+        f"Here is what I know about the dataset:\n"
+        f"- Time series analysis is {'applicable' if has_time_series else 'not applicable'}\n"
+        f"- Visualizations generated: Correlation heatmap, boxplot, histograms, PCA scatterplot.\n"
+        f"Provide:\n"
+        f"- A summary of the most significant findings and patterns.\n"
+        f"- Recommendations for further analysis.\n"
+         f"You may use any of the following functions to help you perform a more detailed analysis if required."
+    )
 
-        - Time series analysis is {'applicable' if has_time_series else 'not applicable'}
-        - Correlation matrix is {'available' if correlation_matrix is not None else 'not available'}
-        - Outliers are {'detected' if outliers is not None else 'not detected'}
-        - Clustering is {'performed' if cluster_labels is not None else 'not performed'}
-
-        Based on this information provide:
-         - a summary of the findings
-         - recommendations for further analysis
-         - a description of any significant patterns detected
-
-         You may use any of the following functions to help you perform a more detailed analysis if required.
-      """
-
-      response = query_llm(prompt, functions=functions)
-      
-      analysis_summary = ""
-      if not isinstance(response, dict):
+    response = query_llm(prompt, functions=functions)
+    
+    analysis_summary = ""
+    if not isinstance(response, dict):
          analysis_summary = response
-      else:
+    else:
           function_name = response["name"]
           function_args = json.loads(response["arguments"])
           if function_name == "perform_time_series_analysis":
@@ -270,150 +354,65 @@ def analyze_with_llm(context_str, file_prefix, has_time_series=False, correlatio
              """
             analysis_summary += query_llm(prompt_outliers)
           else:
-             analysis_summary += "I couldn't understand your request, I'll proceed generating a summary without additional analysis."
+            analysis_summary += "I couldn't understand your request, I'll proceed generating a summary without additional analysis."
+    return analysis_summary
 
-      return analysis_summary
+def save_results(output_dir, analysis, visualizations, story):
+    """Save results to README.md and the output folder."""
+    readme_path = os.path.join(output_dir, "README.md")
+    with open(readme_path, "w") as f:
+        f.write("# Automated Data Analysis Report\n\n")
+        f.write("## Data Overview\n")
+        f.write(f"**Shape**: {analysis['shape']}\n\n")
+        f.write("## Summary Statistics\n")
+        f.write(tabulate(pd.DataFrame(analysis["summary_statistics"]).reset_index(), headers='keys', tablefmt='github'))
+        f.write("\n\n## Narrative\n")
+        f.write(story)
+        f.write("\n\n## Visualizations\n")
+        for viz in visualizations:
+            f.write(f"- ![Visualization]({os.path.basename(viz)})\n")
 
+def create_output_folder(file_path):
+    """Create a structured output folder named after the input file."""
+    output_dir = os.path.splitext(os.path.basename(file_path))[0]
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    return output_dir
 
-def generate_readme(file_path, summary, insights, file_prefix):
-    """Generates and saves the README file."""
-    
-    readme_content = f"""# Analysis of {file_path}
-
-## Dataset Summary
-
-{summary}
-
-## Key Insights
-
-{insights}
-
-## Visualizations
-
-"""
-
-    image_files = [
-        f"{file_prefix}_correlation_matrix.png",
-        f"{file_prefix}_pairplot.png",
-        f"{file_prefix}_outliers.png",
-        f"{file_prefix}_clusters.png"
-    ]
-
-    for image_file in image_files:
-        if os.path.exists(image_file):
-            readme_content += f"![{image_file.replace('.png','').replace(f'{file_prefix}_', '').replace('_', ' ').title()}]({image_file})\n"
-
-    with open("README.md", "w") as f:
-       f.write(readme_content)
-
-def analyze_images_with_llm(file_prefix):
-  """ Analyzes the generated plots using the LLM's vision capabilities"""
-  vision_prompt = f"""
-  I am providing you with the following plots, for the ones you are able to identify, please provide an analysis.
-    
-    - Correlation matrix: {file_prefix}_correlation_matrix.png
-    - Pairplot: {file_prefix}_pairplot.png
-    - Outliers: {file_prefix}_outliers.png
-    - Clusters: {file_prefix}_clusters.png
-
-  """
-  messages = [{"role": "user", "content": vision_prompt}]
-  if os.path.exists(f"{file_prefix}_correlation_matrix.png"):
-      messages[0]["content"] = [{"type": "text", "text": vision_prompt}, {
-              "type": "image_url",
-              "image_url": {
-                    "url": f"data:image/png;base64,{base64_encode_image(f'{file_prefix}_correlation_matrix.png')}"
-                }
-      }]
-  if os.path.exists(f"{file_prefix}_pairplot.png"):
-       messages[0]["content"].append({
-              "type": "image_url",
-              "image_url": {
-                    "url": f"data:image/png;base64,{base64_encode_image(f'{file_prefix}_pairplot.png')}"
-                }
-      })
-  if os.path.exists(f"{file_prefix}_outliers.png"):
-        messages[0]["content"].append({
-              "type": "image_url",
-              "image_url": {
-                    "url": f"data:image/png;base64,{base64_encode_image(f'{file_prefix}_outliers.png')}"
-                }
-      })
-  if os.path.exists(f"{file_prefix}_clusters.png"):
-        messages[0]["content"].append({
-              "type": "image_url",
-              "image_url": {
-                    "url": f"data:image/png;base64,{base64_encode_image(f'{file_prefix}_clusters.png')}"
-                }
-      })
-  try:
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-2024-05-13",
-        messages=messages,
-        max_tokens=1024
-    )
-    return response['choices'][0]['message']['content']
-  except Exception as e:
-        print(f"Error querying LLM: {e}")
-        return None
-
-def base64_encode_image(image_path):
-  """Encodes an image to base64"""
-  import base64
-  with open(image_path, "rb") as image_file:
-    encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
-  return encoded_string
-    
-def analyze_csv(file_path):
-    """Main analysis function."""
-    print(f"Starting analysis for: {file_path}")
-    file_prefix = os.path.splitext(os.path.basename(file_path))[0]
-
-    # Load data
-    data = load_data(file_path)
-
-    # Generate initial summaries
-    summary, missing_values = generate_summary_stats(data)
-
-    # Correlation analysis
-    correlation_matrix = analyze_correlations(data)
-
-    # Outlier detection
-    outliers = detect_outliers(data)
-    
-    # Clustering
-    kmeans_model, cluster_labels = perform_clustering(data)
-
-    # Check for time-series
-    has_time_series = detect_time_series_opportunity(data)
-
-    # LLM Context
-    context_str = create_context_for_llm(data, summary, missing_values)
-
-    # LLM Analysis
-    insights = analyze_with_llm(context_str, file_prefix, has_time_series, correlation_matrix, outliers, cluster_labels, kmeans_model)
-
-    # Generate and save plots
-    generate_and_save_plots(data, file_prefix, correlation_matrix, outliers, cluster_labels, kmeans_model)
-
-    # Generate README
-    generate_readme(file_path, summary, insights, file_prefix)
-
-    # Analyze images using LLM Vision
-    vision_insights = analyze_images_with_llm(file_prefix)
-
-    if vision_insights:
-        with open("README.md", "a") as f:
-            f.write("\n## Image Analysis Insights\n")
-            f.write(vision_insights)
-
-    print("Analysis completed. Results are in README.md and generated PNG files.")
-
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: uv run autolysis.py <path_to_csv>")
+def main():
+    console.log("[cyan]Starting script...")
+    if len(sys.argv) != 2:
+        console.log("[red]Usage: python autolysis.py dataset.csv")
         sys.exit(1)
 
-    csv_file = sys.argv[1]
-    analyze_csv(csv_file)
+    file_path = sys.argv[1]
+    console.log(f"[yellow]Reading file: {file_path}[/]")
+    df = read_csv(file_path)
+    console.log("[green]Dataframe loaded.[/]")
+
+    # Create output folder
+    output_dir = create_output_folder(file_path)
+
+    df = clean_data(df)
+    df = detect_outliers(df)
+    df = perform_clustering(df)
+    pca_path = perform_pca(df)
+    visualizations = visualize_data(df, output_dir)
+    visualizations.append(os.path.join(output_dir, pca_path))
+
+    has_time_series = is_date_column(df)
+
+    analysis = {
+        "shape": df.shape,
+        "columns": df.dtypes.to_dict(),
+        "missing_values": df.isnull().sum().to_dict(),
+        "summary_statistics": df.describe(include="all").to_dict(),
+    }
+
+    story = create_story(analysis, visualizations, df, has_time_series)
+    save_results(output_dir, analysis, visualizations, story)
+
+    console.log("[green]Analysis completed successfully.")
+
+if __name__ == "__main__":
+    main()
