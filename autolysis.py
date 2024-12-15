@@ -320,9 +320,6 @@ def visualize_data(data, output_dir):
     else:
       console.log("[yellow] Insufficient data for PCA scatterplot")
 
-    else:
-        console.log("[yellow]No numeric data available for visualizations.")
-
     return visualizations
 
 def query_llm(prompt, functions=None):
