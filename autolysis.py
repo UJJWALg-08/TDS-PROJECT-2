@@ -307,17 +307,23 @@ def create_story(analysis, visualizations_summary, data, has_time_series):
          }
       ]
 
-    # Convert int64 to int and float to float for JSON serialization
+    # Convert int64 to int and float to float and Timestamp to string for JSON serialization
     columns = [{"name": col, "type": str(data[col].dtype), "missing_values": int(data.isnull().sum()[col])} for col in data.columns]
 
     summary_statistics = {
-        k: {k2: float(v2) if isinstance(v2, (int,float)) else v2 for k2, v2 in v.items()}
+        k: {k2: float(v2) if isinstance(v2, (int,float)) else str(v2) if isinstance(v2, pd.Timestamp) else v2 for k2, v2 in v.items()}
         for k, v in analysis["summary_statistics"].items()
         }
     
+    example_rows = []
+    for row in data.head(3).to_dict(orient="records"):
+        new_row = {k: str(v) if isinstance(v, pd.Timestamp) else v for k, v in row.items()}
+        example_rows.append(new_row)
+
+    
     context_str = json.dumps({
         "columns": columns,
-        "example_rows": data.head(3).to_dict(orient="records"),
+        "example_rows": example_rows,
         "shape": data.shape,
         "summary_statistics": summary_statistics,
     }, indent=2)
