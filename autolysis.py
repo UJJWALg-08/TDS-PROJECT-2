@@ -497,8 +497,7 @@ def create_story(analysis, visualizations, data, has_time_series, statistical_te
               The number of tests is {function_args['tests_count']}.
             """
             analysis_summary += query_llm(prompt_statistical_tests)
-          else:
-            analysis_summary += "I couldn't understand your request, I'll proceed generating a summary without additional analysis."
+          
     return analysis_summary
 
 
