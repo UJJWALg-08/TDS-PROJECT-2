@@ -306,11 +306,20 @@ def create_story(analysis, visualizations_summary, data, has_time_series):
               }
          }
       ]
+
+    # Convert int64 to int and float to float for JSON serialization
+    columns = [{"name": col, "type": str(data[col].dtype), "missing_values": int(data.isnull().sum()[col])} for col in data.columns]
+
+    summary_statistics = {
+        k: {k2: float(v2) if isinstance(v2, (int,float)) else v2 for k2, v2 in v.items()}
+        for k, v in analysis["summary_statistics"].items()
+        }
+    
     context_str = json.dumps({
-        "columns": [{"name": col, "type": str(data[col].dtype), "missing_values": data.isnull().sum()[col]} for col in data.columns],
+        "columns": columns,
         "example_rows": data.head(3).to_dict(orient="records"),
         "shape": data.shape,
-        "summary_statistics": analysis["summary_statistics"]
+        "summary_statistics": summary_statistics,
     }, indent=2)
 
     prompt = (
@@ -356,6 +365,7 @@ def create_story(analysis, visualizations_summary, data, has_time_series):
           else:
             analysis_summary += "I couldn't understand your request, I'll proceed generating a summary without additional analysis."
     return analysis_summary
+
 
 def save_results(output_dir, analysis, visualizations, story):
     """Save results to README.md and the output folder."""
