@@ -473,36 +473,30 @@ def create_story(analysis, visualizations, data, has_time_series, statistical_te
           if function_name == "perform_time_series_analysis":
             analysis_summary += "Performing a time series analysis..."
             analysis_summary += f"You asked me to analize the '{function_args['date_column']}' column but the requested functionality was not implemented in this version."
-          elif function_name == "generate_cluster_summary":
-              if 'cluster_count' in function_args: # This is the fix.
-                  analysis_summary += f"Here is a summary of the generated clusters, based on the analysis we identified {function_args['cluster_count']} clusters."
-                  prompt_cluster = f"""
-                   Provide a summary of the clusters identified in the data:
-                   {context_str}
-                  The number of clusters is {function_args['cluster_count']}.
-                  """
-                  analysis_summary += query_llm(prompt_cluster)
-              
-          elif function_name == "generate_outlier_summary":
-              if 'outlier_count' in function_args:  # This is the fix.
-                  analysis_summary += f"Here is a summary of the detected outliers, I found {function_args['outlier_count']} outliers."
-                  prompt_outliers = f"""
-                   Provide a summary of the outliers identified in the data:
-                   {context_str}
-                   The number of outliers is {function_args['outlier_count']}.
-                   """
-                  analysis_summary += query_llm(prompt_outliers)
-          elif function_name == "summarize_statistical_tests":
-              if 'tests_count' in function_args: # This is the fix
-                analysis_summary += f"Here is a summary of the performed statistical tests, I found {function_args['tests_count']} tests."
-                prompt_statistical_tests = f"""
-                Provide a summary of the statistical tests performed on the dataset:
-                  {context_str}
-                The number of tests is {function_args['tests_count']}.
-                """
-                analysis_summary += query_llm(prompt_statistical_tests)
-          else:
-            analysis_summary += "I couldn't understand your request, I'll proceed generating a summary without additional analysis."
+          if function_name == "generate_cluster_summary":
+             analysis_summary += f"Here is a summary of the generated clusters, based on the analysis we identified {function_args.get('cluster_count',0)} clusters."
+             prompt_cluster = f"""
+             Provide a summary of the clusters identified in the data:
+             {context_str}
+             The number of clusters is {function_args.get('cluster_count',0)}.
+             """
+             analysis_summary += query_llm(prompt_cluster)
+          if function_name == "generate_outlier_summary":
+            analysis_summary += f"Here is a summary of the detected outliers, I found {function_args.get('outlier_count',0)} outliers."
+            prompt_outliers = f"""
+             Provide a summary of the outliers identified in the data:
+             {context_str}
+             The number of outliers is {function_args.get('outlier_count',0)}.
+             """
+            analysis_summary += query_llm(prompt_outliers)
+          if function_name == "summarize_statistical_tests":
+            analysis_summary += f"Here is a summary of the performed statistical tests, I found {function_args.get('tests_count',0)} tests."
+            prompt_statistical_tests = f"""
+              Provide a summary of the statistical tests performed on the dataset:
+               {context_str}
+              The number of tests is {function_args.get('tests_count',0)}.
+            """
+            analysis_summary += query_llm(prompt_statistical_tests)
     return analysis_summary
 
 
